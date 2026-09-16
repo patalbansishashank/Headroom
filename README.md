@@ -83,6 +83,14 @@ Byte 2 is the link flag, bytes 4 through 9 are the headset's own address, little
 
 This same channel reaches flash erase and firmware update. Reading identity values is harmless; a blind opcode sweep is not, and could unpair or brick the headset. Nothing here writes, and the ranges `0x0400-0x04FF` and `0x1C00-0x1CFF` are refused outright.
 
+## Notes for plugin authors
+
+Two things here were learned the hard way and are easy to repeat.
+
+**Use `BarPill`, do not draw your own capsule.** A hand-rolled rounded rectangle looks right in isolation and wrong in the bar. The shared pill sizes its icon at 0.48 of the capsule height, uses `radiusM` rather than a full round, and takes its border width from the theme. Matching that by eye produces a pill that sits visibly taller than its neighbours.
+
+**A daemon outlives the shell that started it.** Restarting Noctalia leaves the old child running and holding whatever device lock it took, so the new shell's daemon can never start. This one asks the kernel to kill it when its parent goes away, and treats losing the lock as a reason to back off rather than a crash to retry every few seconds.
+
 ## Install
 
 ```bash

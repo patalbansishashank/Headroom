@@ -18,6 +18,7 @@ Every frame that is not firmware log spam is written to a frame log. The battery
 delivery model is not fully pinned down yet, and that log is what will settle it.
 """
 import argparse
+import ctypes
 import fcntl
 import json
 import os
@@ -39,10 +40,34 @@ OP_LINK_STATE = 0x2CB1
 STOP = False
 FRAME_LOG_MAX_BYTES = 512 * 1024
 
+EXIT_OK = 0
+EXIT_ALREADY_RUNNING = 3      # distinct so the supervisor can back off, not hammer
+
+PR_SET_PDEATHSIG = 1
+
 
 def _stop(_signum, _frame):
     global STOP
     STOP = True
+
+
+def die_with_parent():
+    """Ask the kernel to kill us when whoever started us goes away.
+
+    Noctalia starts this daemon as a child process, but a child survives its
+    parent by default. Restarting the shell therefore leaves an orphan holding
+    the device lock, and the new shell's daemon can never acquire it. Without
+    this, every shell restart needs a manual cleanup.
+    """
+    try:
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0)
+    except (OSError, AttributeError):
+        return                       # not Linux, or no prctl: nothing to do
+    # The parent may already be gone, in which case the signal above never
+    # arrives and we would linger exactly as intended to prevent.
+    if os.getppid() == 1:
+        sys.exit(EXIT_OK)
 
 
 def acquire_lock(directory):
@@ -250,12 +275,13 @@ def main():
 
     signal.signal(signal.SIGINT, _stop)
     signal.signal(signal.SIGTERM, _stop)
+    die_with_parent()
 
     directory = state_dir()
     if acquire_lock(directory) is None:
         print("headroomd: another instance already holds the dongle; exiting",
               file=sys.stderr)
-        return 0
+        return EXIT_ALREADY_RUNNING
 
     pub = Publisher(directory)
     pub.emit = args.emit

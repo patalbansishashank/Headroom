@@ -11,6 +11,7 @@ ColumnLayout {
 
   property var pluginApi: null
 
+  property string editDisplayMode: "alwaysShow"
   property int  editWarnBelow: 15
   property bool editHideWhenUnavailable: false
   property bool _loaded: false
@@ -24,6 +25,7 @@ ColumnLayout {
       return
     _loaded = false
     var s = pluginApi.pluginSettings
+    editDisplayMode = s.displayMode || "alwaysShow"
     editWarnBelow = s.warnBelow ?? 15
     editHideWhenUnavailable = s.hideWhenUnavailable ?? false
     _loaded = true
@@ -33,6 +35,7 @@ ColumnLayout {
     if (!pluginApi || !_loaded)
       return
     var s = pluginApi.pluginSettings
+    s.displayMode = editDisplayMode
     s.warnBelow = Math.max(0, Math.min(100, editWarnBelow))
     s.hideWhenUnavailable = editHideWhenUnavailable
     pluginApi.saveSettings()
@@ -42,6 +45,24 @@ ColumnLayout {
     Layout.fillWidth: true
     label: "Headset battery"
     description: "Reads the Crusher PLYR 720 through its 2.4 GHz dongle, so the headset's Bluetooth stays free for your phone."
+  }
+
+  NComboBox {
+    Layout.fillWidth: true
+    label: "Display mode"
+    description: "Whether the percentage sits beside the icon, or only appears on hover."
+    minimumWidth: 200
+    model: [
+      { "key": "alwaysShow", "name": "Always show" },
+      { "key": "onhover", "name": "On hover" },
+      { "key": "alwaysHide", "name": "Icon only" }
+    ]
+    currentKey: root.editDisplayMode
+    defaultValue: "alwaysShow"
+    onSelected: (key) => {
+      root.editDisplayMode = key
+      root.saveSettings()
+    }
   }
 
   NSpinBox {

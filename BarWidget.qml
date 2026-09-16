@@ -1,16 +1,21 @@
 import QtQuick
-import QtQuick.Layouts
 import Quickshell
 import qs.Commons
-import qs.Widgets
+import qs.Modules.Bar.Extras
 import qs.Services.UI
+import qs.Widgets
 
-// A headphone glyph with the headset's battery level beside it.
+// The headset's battery level in the bar.
 //
-// Deliberately not the same shape as Noctalia's own Battery widget: that one is
-// the laptop, this one is the headset, and at a glance in the bar they must not
-// be mistaken for each other. Hence the headphone icon rather than a second
-// battery pill.
+// This uses BarPill rather than drawing its own capsule. Hand-rolling one looks
+// close but is not: the shared pill sizes its icon at 0.48 of the capsule
+// height, uses radiusM rather than a full round, and takes its border width
+// from the theme. Reimplementing that by eye produces a pill that sits visibly
+// taller than its neighbours, which is exactly what happened here first.
+//
+// The headphone icon is the point of difference from Noctalia's own Battery
+// widget: that one is the laptop, this one is the headset, and in the bar they
+// must not read as the same thing.
 Item {
   id: root
 
@@ -20,11 +25,6 @@ Item {
   property string section: ""
   property int sectionWidgetIndex: -1
   property int sectionWidgetsCount: 0
-
-  readonly property string screenName: screen?.name ?? ""
-  readonly property string barPosition: Settings.getBarPositionForScreen(screenName)
-  readonly property bool isBarVertical: barPosition === "left" || barPosition === "right"
-  readonly property real capsuleHeight: Style.getCapsuleHeightForScreen(screenName)
 
   readonly property var main: pluginApi?.mainInstance ?? null
   readonly property var config: pluginApi?.pluginSettings ?? null
@@ -37,109 +37,60 @@ Item {
 
   readonly property int warnBelow: config?.warnBelow ?? 15
   readonly property bool hideWhenUnavailable: config?.hideWhenUnavailable ?? false
+  readonly property string displayMode: config?.displayMode ?? "alwaysShow"
 
-  // A level nobody has refreshed in hours is history, not status. Show it
-  // faded rather than pretending it is current.
+  // A level nobody has refreshed in an hour is history, not status. The dongle
+  // only volunteers it when the headset links, so this happens routinely.
   readonly property bool stale: ageSeconds > 3600
   readonly property bool low: hasReading && percent < warnBelow
 
   readonly property bool available: donglePresent && hasReading
   visible: available || !hideWhenUnavailable
 
-  readonly property color tint: {
-    if (!available)
-      return Color.mOnSurfaceVariant
-    if (low)
-      return Color.mError
-    return Color.mOnSurface
-  }
+  implicitWidth: pill.width
+  implicitHeight: pill.height
 
-  readonly property real iconSize: capsuleHeight * 0.55
+  BarPill {
+    id: pill
 
-  implicitWidth: isBarVertical ? capsuleHeight : row.implicitWidth + Style.marginM * 2
-  implicitHeight: isBarVertical ? column.implicitHeight + Style.marginM * 2 : capsuleHeight
+    screen: root.screen
+    oppositeDirection: BarService.getPillDirection(root)
 
-  Rectangle {
-    anchors.fill: parent
-    radius: Math.round(height / 2)
-    color: Style.capsuleColor
-    border.color: root.low && root.available ? Color.mError : Style.capsuleBorderColor
-    border.width: Math.max(1, Style.borderS)
-  }
+    icon: root.donglePresent ? "headphones" : "headphones-off"
+    text: root.hasReading ? String(root.percent) : ""
+    suffix: root.hasReading ? "%" : ""
 
-  // Horizontal bar: icon then the number.
-  RowLayout {
-    id: row
-    anchors.centerIn: parent
-    visible: !root.isBarVertical
-    spacing: Style.marginXS
+    autoHide: false
+    forceOpen: root.displayMode === "alwaysShow" && root.hasReading
+    forceClose: root.displayMode === "alwaysHide" || !root.hasReading
 
-    NIcon {
-      icon: root.donglePresent ? "headphones" : "headphones-off"
-      pointSize: root.iconSize
-      color: root.tint
-      opacity: root.stale ? 0.55 : 1.0
+    // Only colour the pill when it is telling you something you must act on.
+    customTextIconColor: root.low ? Color.mError : "transparent"
+
+    // Faded while the reading is old, so a stale number never reads as live.
+    opacity: root.stale ? 0.6 : 1.0
+    Behavior on opacity {
+      NumberAnimation {
+        duration: Style.animationNormal
+      }
     }
 
-    NText {
-      visible: root.hasReading
-      text: root.percent + "%"
-      pointSize: Style.fontSizeS
-      font.weight: Font.DemiBold
-      color: root.tint
-      opacity: root.stale ? 0.55 : 1.0
+    tooltipText: {
+      if (!root.donglePresent)
+        return "PLYR 720\nDongle not connected"
+      if (!root.hasReading)
+        return root.linked === false ? "PLYR 720\nHeadset off"
+                                     : "PLYR 720\nWaiting for the headset to report"
+
+      var lines = [`Crusher PLYR 720: ${root.percent}%`]
+      if (root.ageSeconds > 120 && root.main?.updatedAt) {
+        lines.push("Measured at " + Qt.formatTime(new Date(root.main.updatedAt), "HH:mm"))
+        // Worth saying plainly: this is not a number that ticks down live.
+        lines.push("Refreshes when the headset is powered on")
+      }
+      if (root.linked === false)
+        lines.push("Headset is currently off")
+      return lines.join("\n")
     }
-  }
-
-  // Vertical bar: icon over the number, no percent sign (there is no room).
-  ColumnLayout {
-    id: column
-    anchors.centerIn: parent
-    visible: root.isBarVertical
-    spacing: 0
-
-    NIcon {
-      Layout.alignment: Qt.AlignHCenter
-      icon: root.donglePresent ? "headphones" : "headphones-off"
-      pointSize: root.iconSize
-      color: root.tint
-      opacity: root.stale ? 0.55 : 1.0
-    }
-
-    NText {
-      Layout.alignment: Qt.AlignHCenter
-      visible: root.hasReading
-      text: String(root.percent)
-      pointSize: Style.fontSizeXS
-      font.weight: Font.DemiBold
-      color: root.tint
-      opacity: root.stale ? 0.55 : 1.0
-    }
-  }
-
-  function tooltipText() {
-    if (!donglePresent)
-      return "PLYR 720: dongle not connected"
-    if (!hasReading) {
-      if (linked === false)
-        return "PLYR 720: headset off"
-      return "PLYR 720: waiting for the headset to report"
-    }
-    var when = new Date(main.updatedAt)
-    var clock = Qt.formatTime(when, "HH:mm")
-    var body = `Crusher PLYR 720: ${percent}%`
-    if (ageSeconds > 120)
-      body += `, as of ${clock}`
-    if (linked === false)
-      body += " (headset off)"
-    return body
-  }
-
-  MouseArea {
-    anchors.fill: parent
-    hoverEnabled: true
-    onEntered: TooltipService.show(root, root.tooltipText(),
-                                  BarService.getTooltipDirection(root.screen?.name))
-    onExited: TooltipService.hide()
   }
 }

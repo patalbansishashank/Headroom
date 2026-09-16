@@ -14,7 +14,7 @@
   },
   "metadata": {
     "defaultSettings": {
-      "showWhenIdle": true,
+      "displayMode": "alwaysShow",
       "warnBelow": 15,
       "hideWhenUnavailable": false
     }

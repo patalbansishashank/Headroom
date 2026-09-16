@@ -28,6 +28,10 @@ Item {
   readonly property string daemonPath: (pluginApi?.pluginDir ?? "") + "/bin/headroomd.py"
   readonly property bool wantRunning: pluginApi !== null && pluginApi.manifest !== null
 
+  // Exit code the daemon uses for "another instance already holds the device".
+  readonly property int exitAlreadyRunning: 3
+  property int restartBackoff: 3000
+
   function reset() {
     percent = -1
     donglePresent = false
@@ -51,6 +55,7 @@ Item {
           root.donglePresent = s.dongle === true
           root.linked = (s.linked === undefined) ? null : s.linked
           root.updatedAt = s.updated ? s.updated * 1000 : 0
+          root.restartBackoff = 3000        // it started; forget past contention
         } catch (e) {
           Logger.w("Headroom", "unparsable line from daemon:", line)
         }
@@ -67,10 +72,20 @@ Item {
 
     onExited: (code) => {
       root.reset()
-      if (root.wantRunning) {
+      if (!root.wantRunning)
+        return
+
+      // Losing the race for the device lock is not a crash, and retrying every
+      // few seconds forever just fills the log. Back off instead, up to a
+      // minute, and reset once a start actually sticks.
+      if (code === root.exitAlreadyRunning) {
+        root.restartBackoff = Math.min(root.restartBackoff * 2, 60000)
+        Logger.w("Headroom", `device held by another instance; retrying in ${root.restartBackoff / 1000}s`)
+      } else {
         Logger.w("Headroom", `daemon exited (${code}); restarting`)
-        restartTimer.restart()
       }
+      restartTimer.interval = root.restartBackoff
+      restartTimer.restart()
     }
   }
 
@@ -78,7 +93,7 @@ Item {
   // back after a pause rather than hammering a broken install.
   Timer {
     id: restartTimer
-    interval: 3000
+    interval: root.restartBackoff
     repeat: false
     onTriggered: if (root.wantRunning && !daemon.running) daemon.running = true
   }
