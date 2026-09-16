@@ -62,7 +62,9 @@ A third trap cost real time here: the frames worth having arrive in a **backlog*
 
 `0x0CD5` returns `status, earbud selector, 6-byte address`. The selector byte is meaningless on a headset and returns junk, which is a good way to waste an hour if you assume the payload is just an address.
 
-`0x2CB1` is undocumented elsewhere. Byte 2 is the link flag, bytes 4 through 9 are the headset's own address, little-endian:
+`0x2CB1` is undocumented elsewhere. It is indication-only: sent as a request it draws no reply at all, unlike `0x0CD6`, which is explicitly refused. The dongle therefore knows `0x0CD6` and is declining it, rather than not implementing it.
+
+Byte 2 is the link flag, bytes 4 through 9 are the headset's own address, little-endian:
 
 ```
 00 02 00 01  5e 1f b5 f8 bb cd  ff 00    headset gone
