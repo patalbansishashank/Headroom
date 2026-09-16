@@ -81,12 +81,32 @@ class Publisher:
         self.frame_log = os.path.join(directory, "frames.log")
         self.percent = None
         self.percent_at = None
+        self._restore()
         self.dongle = False
         self.linked = None
         self.headset_addr = None
         self.identity = {}
         self.emit = False            # also print a JSON line on every change
         self._last_emitted = None
+
+    def _restore(self):
+        """Carry the last known level across a restart.
+
+        The dongle only volunteers the battery around the moment the headset
+        links. Starting blank would mean showing nothing until the next power
+        cycle, which could be hours. The level is reloaded with its original
+        timestamp, so it is presented as old rather than as fresh.
+        """
+        try:
+            with open(self.path) as fh:
+                previous = json.load(fh)
+        except (OSError, ValueError):
+            return
+        level = previous.get("percent")
+        when = previous.get("updated")
+        if isinstance(level, int) and 0 <= level <= 100 and isinstance(when, (int, float)):
+            self.percent = level
+            self.percent_at = when
 
     def note_frame(self, frame):
         """Append to the frame log, trimming it when it gets large."""

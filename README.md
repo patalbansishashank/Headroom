@@ -8,20 +8,28 @@ Skullcandy ships no Linux software, and the headset is not supported by [Headset
 
 ## Status
 
-The transport is solved and proven. Battery delivery is not fully characterised yet.
+Working. The battery level is real and confirmed against hardware, with one honest limitation.
 
 | Capability | State |
 | --- | --- |
 | Talk to the dongle over its vendor protocol | Working |
 | Read firmware identity and Bluetooth address | Working |
 | Detect the headset linking and unlinking | Working |
-| Read battery level | Partial, see below |
+| Read battery level | Working, refreshes when the headset links |
 
-The dongle **refuses** an on-demand battery request. Opcode `0x0CD6` is answered with a status-only acknowledgement carrying `0x02`, for every argument tried, whether the audio link is idle or actively streaming. The level instead arrives unsolicited, as an indication, and has so far only been observed in the burst of frames that is already queued when a listener attaches.
+The dongle **refuses** an on-demand battery request. Opcode `0x0CD6` is answered with a status-only acknowledgement carrying `0x02`, for every argument tried, with the headset linked and while audio is actively streaming. The refusal is deliberate rather than a gap: the dongle clearly knows the opcode, because an opcode it does not implement draws no reply at all.
 
-Headroom therefore does not poll. It holds the channel open, keeps every frame, and publishes the level whenever the dongle volunteers one. Until the trigger is pinned down, the bar can show a level that is some minutes or hours old, and the widget fades it and puts the timestamp in the tooltip rather than pretending it is live.
+The level instead arrives unsolicited, as a `0x5D` indication, around the moment the headset links. That is reliable and reproducible: a single power cycle yields the level within a second or two.
 
-Every frame is written to a log, which is the raw material for closing this gap:
+So Headroom does not poll. It holds the channel open and publishes whatever the dongle volunteers. Between power cycles the level does not move, so the widget fades it and puts the time it was taken in the tooltip rather than presenting stale data as live. The last reading is persisted, so restarting the shell does not blank the widget until your next power cycle.
+
+There is no known way to force a refresh short of power-cycling the headset. If you want the level updated, turn it off and on.
+
+### A dead end worth recording
+
+Byte 1 of the `0x0CD5` response repeatedly came back as `0x61`, `0x62`, `0x63` at exactly the moments the indications reported 97%, 98% and 99%, which looks like a pollable battery hiding in the address response. It is not. Queried while linked it returns `0x00` every time. The byte is a stale shared buffer that sometimes still holds the last indication's value, and the published reading of it as an earbud selector is correct.
+
+Every frame is logged, which is the raw material for anyone wanting to push this further:
 
 ```bash
 bin/headroomctl.py --frames
