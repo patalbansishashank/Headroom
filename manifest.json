@@ -1,0 +1,22 @@
+{
+  "id": "headroom",
+  "name": "Headroom",
+  "version": "1.0.0",
+  "minNoctaliaVersion": "4.0.0",
+  "author": "Shashank Patalbansi",
+  "license": "MIT",
+  "repository": "https://github.com/patalbansishashank/Headroom",
+  "description": "Battery level for the Skullcandy Crusher PLYR 720 over its 2.4 GHz dongle, so the headset's Bluetooth stays free for your phone.",
+  "entryPoints": {
+    "main": "Main.qml",
+    "barWidget": "BarWidget.qml",
+    "settings": "Settings.qml"
+  },
+  "metadata": {
+    "defaultSettings": {
+      "showWhenIdle": true,
+      "warnBelow": 15,
+      "hideWhenUnavailable": false
+    }
+  }
+}

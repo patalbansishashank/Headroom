@@ -1,0 +1,255 @@
+#!/usr/bin/env python3
+"""
+Headroom daemon: keep a live RACE session to the Skullcandy dongle and publish
+the headset's battery level as a small JSON state file.
+
+Why a daemon rather than a one-shot reader. The dongle refuses an on-demand
+battery request over USB: opcode 0x0CD6 is answered with a status-only ack
+carrying 0x02, for every argument tried. The level instead arrives unsolicited,
+as a 0x5D indication, and appears to be pushed around the moment the headset
+links. Nothing polls it into existence, so the only way to catch it is to hold
+the channel open and be listening when it comes.
+
+The dongle also re-enumerates when the headset is powered off, so the hidraw
+node disappears and comes back under a new device number. The daemon treats
+that as normal and reconnects.
+
+Every frame that is not firmware log spam is written to a frame log. The battery
+delivery model is not fully pinned down yet, and that log is what will settle it.
+"""
+import argparse
+import fcntl
+import json
+import os
+import signal
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from headroom_race import (  # noqa: E402
+    DeviceGone, OP_BATTERY, Race, T_IND, find_node,
+)
+
+# The dongle announces the headset link on this opcode. Byte 2 is the link flag
+# and bytes 4..9 are the headset's Bluetooth address, little-endian:
+#   00 02 00 01 <addr> ff 00   headset gone
+#   00 02 01 01 <addr> 80 01   headset linked
+OP_LINK_STATE = 0x2CB1
+
+STOP = False
+FRAME_LOG_MAX_BYTES = 512 * 1024
+
+
+def _stop(_signum, _frame):
+    global STOP
+    STOP = True
+
+
+def acquire_lock(directory):
+    """Single-instance guard.
+
+    Two daemons would fight over both the device and the state file, and the
+    loser would publish a "dongle gone" that is merely its own shutdown. Returns
+    the held descriptor, which must stay open for the life of the process.
+    """
+    path = os.path.join(directory, "daemon.lock")
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    os.ftruncate(fd, 0)
+    os.write(fd, f"{os.getpid()}\n".encode())
+    return fd
+
+
+def state_dir():
+    base = os.environ.get("XDG_RUNTIME_DIR") or os.path.join(
+        os.path.expanduser("~"), ".cache"
+    )
+    path = os.path.join(base, "headroom")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+class Publisher:
+    """Owns the state file. Writes are atomic so a reader never sees a tear."""
+
+    def __init__(self, directory):
+        self.path = os.path.join(directory, "state.json")
+        self.frame_log = os.path.join(directory, "frames.log")
+        self.percent = None
+        self.percent_at = None
+        self.dongle = False
+        self.linked = None
+        self.headset_addr = None
+        self.identity = {}
+        self.emit = False            # also print a JSON line on every change
+        self._last_emitted = None
+
+    def note_frame(self, frame):
+        """Append to the frame log, trimming it when it gets large."""
+        try:
+            if (os.path.exists(self.frame_log)
+                    and os.path.getsize(self.frame_log) > FRAME_LOG_MAX_BYTES):
+                with open(self.frame_log) as fh:
+                    tail = fh.readlines()[-2000:]
+                with open(self.frame_log, "w") as fh:
+                    fh.writelines(tail)
+            stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            with open(self.frame_log, "a") as fh:
+                fh.write(f"{stamp} {frame}\n")
+        except OSError:
+            pass
+
+    def publish(self):
+        payload = {
+            "percent": self.percent,
+            "updated": self.percent_at,
+            "age": None if self.percent_at is None else round(time.time() - self.percent_at, 1),
+            "dongle": self.dongle,
+            "linked": self.linked,
+            "headset": self.headset_addr,
+            "identity": self.identity,
+            "published": time.time(),
+        }
+        tmp = self.path + ".tmp"
+        try:
+            with open(tmp, "w") as fh:
+                json.dump(payload, fh)
+            os.replace(tmp, self.path)
+        except OSError:
+            pass
+
+        if self.emit:
+            # Noctalia reads this on the daemon's stdout. Only changes are
+            # printed, so an idle headset does not spam the shell.
+            signature = (self.percent, self.dongle, self.linked)
+            if signature != self._last_emitted:
+                self._last_emitted = signature
+                print(json.dumps({"percent": self.percent,
+                                  "dongle": self.dongle,
+                                  "linked": self.linked,
+                                  "updated": self.percent_at}), flush=True)
+
+
+def handle_frame(pub, frame, verbose):
+    """Called for every frame the dongle sends, from whichever read path."""
+    pub.note_frame(frame)
+    if verbose:
+        print(f"  {frame}", flush=True)
+
+    if frame.opcode == OP_BATTERY and frame.type == T_IND and frame.payload:
+        level = frame.payload[0]
+        if 0 <= level <= 100:
+            pub.percent = level
+            pub.percent_at = time.time()
+            if verbose:
+                print(f"headroomd: battery {level}%", flush=True)
+            pub.publish()
+
+    elif frame.opcode == OP_LINK_STATE and len(frame.payload) >= 10:
+        pub.linked = bool(frame.payload[2])
+        addr = frame.payload[4:10][::-1]
+        pub.headset_addr = ":".join(f"{b:02x}" for b in addr)
+        if verbose:
+            print(f"headroomd: headset {'linked' if pub.linked else 'gone'} "
+                  f"({pub.headset_addr})", flush=True)
+        pub.publish()
+
+
+def serve(pub, verbose, poll_interval):
+    """One connected session. Returns when the dongle goes away."""
+    node = find_node()
+    if not node:
+        return False
+
+    try:
+        race = Race(node)
+    except PermissionError:
+        print(f"headroomd: no access to {node}. Install the udev rule "
+              f"(udev/70-skullcandy-plyr.rules) and re-trigger udev.",
+              file=sys.stderr)
+        time.sleep(5)
+        return False
+    except OSError:
+        return False
+
+    pub.dongle = True
+    if verbose:
+        print(f"headroomd: attached to {node}", flush=True)
+
+    race.on_frame = lambda frame: handle_frame(pub, frame, verbose)
+
+    with race:
+        try:
+            # The link-up burst is already queued by the time we attach. Decode
+            # it before anything else; this is where the interesting events are.
+            race.drain(1.5)
+            try:
+                pub.identity = race.identify()
+                if verbose and pub.identity:
+                    print(f"headroomd: {pub.identity}", flush=True)
+            except DeviceGone:
+                raise
+            except OSError:
+                pass
+            pub.publish()
+
+            next_poll = time.time() + poll_interval if poll_interval else None
+            while not STOP:
+                race.poll(0.5)          # frames are handled by the callback
+                if next_poll and time.time() >= next_poll:
+                    # Refused so far, but it costs nothing and would be the
+                    # cheapest possible win if some link state accepts it.
+                    race.send(OP_BATTERY)
+                    next_poll = time.time() + poll_interval
+                pub.publish()
+        except DeviceGone:
+            if verbose:
+                print("headroomd: dongle went away (headset powered off?)", flush=True)
+        except OSError:
+            pass
+
+    pub.dongle = False
+    pub.linked = None
+    pub.publish()
+    return True
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="print every frame as it arrives")
+    parser.add_argument("--poll-interval", type=float, default=60.0, metavar="SEC",
+                        help="also send a battery request this often (0 disables)")
+    parser.add_argument("--emit", action="store_true",
+                        help="print a JSON line on stdout whenever the state changes")
+    args = parser.parse_args()
+
+    signal.signal(signal.SIGINT, _stop)
+    signal.signal(signal.SIGTERM, _stop)
+
+    directory = state_dir()
+    if acquire_lock(directory) is None:
+        print("headroomd: another instance already holds the dongle; exiting",
+              file=sys.stderr)
+        return 0
+
+    pub = Publisher(directory)
+    pub.emit = args.emit
+    pub.publish()
+    if args.verbose:
+        print(f"headroomd: state -> {pub.path}", flush=True)
+
+    while not STOP:
+        if not serve(pub, args.verbose, args.poll_interval):
+            time.sleep(2.0)          # dongle absent or unreadable; wait and retry
+    pub.dongle = False
+    pub.publish()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

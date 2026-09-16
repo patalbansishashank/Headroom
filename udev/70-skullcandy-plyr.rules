@@ -1,0 +1,8 @@
+# Skullcandy CRUSHER PLYR 720 dongle - grant the seat-local user access to the
+# vendor HID interface (Airoha RACE channel, usage page 0xFF13).
+#
+# The prefix MUST sort before 73-seat-late.rules: that file is what actually
+# runs the uaccess builtin, and it only does so for devices already tagged
+# when it is evaluated. A 99- prefix sets the tag too late and silently
+# grants nothing.
+KERNEL=="hidraw*", ATTRS{idVendor}=="34f0", ATTRS{idProduct}=="5310", MODE="0660", TAG+="uaccess"
