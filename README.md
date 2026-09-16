@@ -72,11 +72,11 @@ A third trap cost real time here: the frames worth having arrive in a **backlog*
 
 `0x2CB1` is undocumented elsewhere. It is indication-only: sent as a request it draws no reply at all, unlike `0x0CD6`, which is explicitly refused. The dongle therefore knows `0x0CD6` and is declining it, rather than not implementing it.
 
-Byte 2 is the link flag, bytes 4 through 9 are the headset's own address, little-endian:
+Byte 2 is the link flag, bytes 4 through 9 are the headset's own address, little-endian (shown here as `aa bb cc dd ee ff`):
 
 ```
-00 02 00 01  5e 1f b5 f8 bb cd  ff 00    headset gone
-00 02 01 01  5e 1f b5 f8 bb cd  80 01    headset linked
+00 02 00 01  aa bb cc dd ee ff  ff 00    headset gone
+00 02 01 01  aa bb cc dd ee ff  80 01    headset linked
 ```
 
 ### A warning
