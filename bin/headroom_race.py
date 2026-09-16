@@ -163,6 +163,19 @@ class Race:
                 frames.append(frame)
         return frames
 
+    def pump(self):
+        """One read cycle. True if the device had anything queued for us.
+
+        The dongle does not push on its interrupt endpoint (verified: a poll on
+        the hidraw node never fires, even with a reply outstanding), so reports
+        can only be fetched with GET_REPORT. Polling is therefore unavoidable,
+        and the caller is responsible for choosing a sane rate.
+        """
+        if self._pull():
+            self._decode()
+            return True
+        return False
+
     def poll(self, seconds=0.0):
         """Read for a window, returning whatever frames arrived."""
         frames, deadline = [], time.time() + seconds

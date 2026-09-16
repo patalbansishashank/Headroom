@@ -83,6 +83,18 @@ Byte 2 is the link flag, bytes 4 through 9 are the headset's own address, little
 
 This same channel reaches flash erase and firmware update. Reading identity values is harmless; a blind opcode sweep is not, and could unpair or brick the headset. Nothing here writes, and the ranges `0x0400-0x04FF` and `0x1C00-0x1CFF` are refused outright.
 
+### Cost
+
+The daemon is idle-cheap by design, which took a second pass to achieve.
+
+The dongle answers only `GET_REPORT`; it never pushes on its interrupt endpoint, verified by waiting on the hidraw node with a reply outstanding and seeing nothing. So reads have to be polled. But it buffers frames, so polling fast buys nothing: Headroom reads once a second at rest and drops to 5 ms the moment a frame appears, draining a burst at full speed before easing back. Idle CPU is below what `/proc` can resolve over ten seconds.
+
+The state file is written only when a value actually changes, not on a timer. Readers derive age from the stored timestamp, so a still-correct file never needs rewriting. At rest it is not touched at all.
+
+### One oddity
+
+A single link-up emits several battery indications within the same second, and they disagree slightly. One observed burst read 98, 97, 96, 99, 100, 99. Headroom takes the last. Treat the number as accurate to a couple of percent rather than exact.
+
 ## Notes for plugin authors
 
 Two things here were learned the hard way and are easy to repeat.

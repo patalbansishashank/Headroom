@@ -43,6 +43,13 @@ FRAME_LOG_MAX_BYTES = 512 * 1024
 EXIT_OK = 0
 EXIT_ALREADY_RUNNING = 3      # distinct so the supervisor can back off, not hammer
 
+# Read pacing. The dongle answers only GET_REPORT, so this has to poll; the
+# question is how often. It buffers frames, so nothing is lost by asking
+# slowly, and a burst is drained at full speed once the first frame shows up.
+# Idle cost drops ~50x versus polling flat out.
+IDLE_DELAY = 1.0
+BUSY_DELAY = 0.005
+
 PR_SET_PDEATHSIG = 1
 
 
@@ -113,6 +120,7 @@ class Publisher:
         self.identity = {}
         self.emit = False            # also print a JSON line on every change
         self._last_emitted = None
+        self._last_written = None
 
     def _restore(self):
         """Carry the last known level across a restart.
@@ -148,11 +156,23 @@ class Publisher:
         except OSError:
             pass
 
-    def publish(self):
+    def publish(self, force=False):
+        """Write the state file, but only when something actually changed.
+
+        Called unconditionally this would rewrite the file twice a second
+        forever with identical content. Consumers derive age from `updated`,
+        so a still-current file does not need rewriting just because time
+        passed.
+        """
+        signature = (self.percent, self.percent_at, self.dongle,
+                     self.linked, self.headset_addr)
+        if not force and signature == self._last_written:
+            return
+        self._last_written = signature
+
         payload = {
             "percent": self.percent,
             "updated": self.percent_at,
-            "age": None if self.percent_at is None else round(time.time() - self.percent_at, 1),
             "dongle": self.dongle,
             "linked": self.linked,
             "headset": self.headset_addr,
@@ -243,14 +263,21 @@ def serve(pub, verbose, poll_interval):
             pub.publish()
 
             next_poll = time.time() + poll_interval if poll_interval else None
+            delay = IDLE_DELAY
             while not STOP:
-                race.poll(0.5)          # frames are handled by the callback
+                # Frames reach the publisher through the callback. Speed up the
+                # moment anything arrives so a link-up burst drains promptly,
+                # then ease back off to the idle rate.
+                if race.pump():
+                    delay = BUSY_DELAY
+                else:
+                    delay = min(delay * 2.0, IDLE_DELAY)
+
                 if next_poll and time.time() >= next_poll:
-                    # Refused so far, but it costs nothing and would be the
-                    # cheapest possible win if some link state accepts it.
                     race.send(OP_BATTERY)
                     next_poll = time.time() + poll_interval
-                pub.publish()
+
+                time.sleep(delay)
         except DeviceGone:
             if verbose:
                 print("headroomd: dongle went away (headset powered off?)", flush=True)
@@ -267,8 +294,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="print every frame as it arrives")
-    parser.add_argument("--poll-interval", type=float, default=60.0, metavar="SEC",
-                        help="also send a battery request this often (0 disables)")
+    parser.add_argument("--poll-interval", type=float, default=0.0, metavar="SEC",
+                        help="also send a battery request this often; off by "
+                             "default because the dongle refuses it (see README)")
     parser.add_argument("--emit", action="store_true",
                         help="print a JSON line on stdout whenever the state changes")
     args = parser.parse_args()
@@ -285,7 +313,7 @@ def main():
 
     pub = Publisher(directory)
     pub.emit = args.emit
-    pub.publish()
+    pub.publish(force=True)
     if args.verbose:
         print(f"headroomd: state -> {pub.path}", flush=True)
 

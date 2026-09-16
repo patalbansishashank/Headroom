@@ -54,7 +54,8 @@ def describe(state):
     percent = state.get("percent")
     if percent is None:
         return "", "PLYR 720 linked, battery not reported yet", "battery-medium", "none"
-    age = state.get("age") or 0
+    updated = state.get("updated")
+    age = 0 if updated is None else max(0.0, time.time() - updated)
     if age > STALE_AFTER:
         return "", f"PLYR 720 last reported {percent}% (stale)", "battery-medium", "none"
     when = time.strftime("%H:%M", time.localtime(state.get("updated", time.time())))
