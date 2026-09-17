@@ -37,9 +37,20 @@ TYPE_NAMES = {T_REQ: "CMD", T_RESP: "RESP", T_REQ_NR: "CMD_NR", T_IND: "IND"}
 # one comes from the HyperHeadset project, which reads it over BLE.
 OP_SDK_VERSION = 0x0301
 OP_BD_ADDRESS = 0x0CD5
-OP_BATTERY = 0x0CD6
 OP_BUILD_VERSION = 0x1E08
 OP_FIRMWARE_LOG = 0x0F92          # continuous debug text; always discarded
+
+# NOT the battery, despite what the HyperHeadset project reports for a
+# different Airoha headset over BLE. On this dongle 0x0CD6 emits long
+# monotonic runs of values, dozens at a time within a single second, stepping
+# by one, and the identical run repeats across unrelated events. A battery
+# cannot do that. It is almost certainly a continuous control (the Crusher has
+# a haptic bass slider) being echoed as it moves.
+OP_SWEEP_CONTROL = 0x0CD6
+
+# Also not identified. Moves in steps of 5, which looks like a volume, but it
+# does not track the host sink volume.
+OP_STEPPED_CONTROL = 0x2CD0
 
 # Ranges that erase flash or drive a firmware update. Never probed.
 DANGEROUS_RANGES = ((0x0400, 0x04FF), (0x1C00, 0x1CFF))

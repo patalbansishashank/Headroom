@@ -78,9 +78,11 @@ Item {
     tooltipText: {
       if (!root.donglePresent)
         return "PLYR 720\nDongle not connected"
-      if (!root.hasReading)
-        return root.linked === false ? "PLYR 720\nHeadset off"
-                                     : "PLYR 720\nWaiting for the headset to report"
+      if (!root.hasReading) {
+        var head = root.linked === false ? "PLYR 720\nHeadset off"
+                                         : "PLYR 720\nHeadset connected"
+        return head + "\n\nNo battery level: the dongle does not report one.\nPlugging the charger in produces no frames at all."
+      }
 
       var lines = [`Crusher PLYR 720: ${root.percent}%`]
       if (root.ageSeconds > 120 && root.main?.updatedAt) {

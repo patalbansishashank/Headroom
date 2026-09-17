@@ -1,6 +1,8 @@
 # Headroom
 
-Battery level for the **Skullcandy Crusher PLYR 720** in the [Noctalia](https://github.com/noctalia-dev/noctalia-shell) bar, read over the headset's 2.4 GHz USB dongle.
+Talks to the **Skullcandy Crusher PLYR 720** dongle over its vendor protocol from Linux, and reports headset link state in the [Noctalia](https://github.com/noctalia-dev/noctalia-shell) bar.
+
+It was built to read the battery level. It cannot: the dongle does not expose one. See Status.
 
 Pairing the headset to the PC over Bluetooth would also surface a battery level, through BlueZ and UPower, with no custom code at all. That is not what this is for. The PLYR 720 has exactly one Bluetooth slot, and the point here is to spend it on a phone while the PC talks to the dongle.
 
@@ -8,32 +10,45 @@ Skullcandy ships no Linux software, and the headset is not supported by [Headset
 
 ## Status
 
-Working. The battery level is real and confirmed against hardware, with one honest limitation.
+**The dongle does not expose the headset's battery.** Everything else works. This is a negative result, arrived at by measurement rather than assumption, and it is documented here so nobody repeats the search.
 
 | Capability | State |
 | --- | --- |
 | Talk to the dongle over its vendor protocol | Working |
 | Read firmware identity and Bluetooth address | Working |
 | Detect the headset linking and unlinking | Working |
-| Read battery level | Working, refreshes when the headset links |
+| Read battery level | **Not available** |
 
-The dongle **refuses** an on-demand battery request. Opcode `0x0CD6` is answered with a status-only acknowledgement carrying `0x02`, for every argument tried, with the headset linked and while audio is actively streaming. The refusal is deliberate rather than a gap: the dongle clearly knows the opcode, because an opcode it does not implement draws no reply at all.
+### How that was established
 
-The level instead arrives unsolicited, as a `0x5D` indication, around the moment the headset links. That is reliable and reproducible: a single power cycle yields the level within a second or two.
+An earlier version of this project reported a battery percentage. It was wrong. The value came from opcode `0x0CD6`, taken from the HyperHeadset project, which reads it over Bluetooth on a HyperX headset. On this dongle that opcode emits long monotonic runs, dozens of values within a single second, stepping by one, and the identical run repeats across unrelated events. Taking the last value of each run produced a number that looked like a battery and was not one.
 
-So Headroom does not poll. It holds the channel open and publishes whatever the dongle volunteers. Between power cycles the level does not move, so the widget fades it and puts the time it was taken in the tooltip rather than presenting stale data as live. The last reading is persisted, so restarting the shell does not blank the widget until your next power cycle.
+A controlled elimination run settled it. Each action was performed deliberately while every frame was recorded:
 
-There is no known way to force a refresh short of power-cycling the headset. If you want the level updated, turn it off and on.
+| Action | Frames produced |
+| --- | --- |
+| Idle | 0 |
+| Bass slider through its full range | 0 |
+| Volume up and down | 0 |
+| **Power cycle** | **40** |
+| Charger plugged in | 0 |
+| Charger unplugged | 0 |
 
-### A dead end worth recording
+Only the link transition says anything at all. Plugging a charger into the headset produces **nothing**, which is close to conclusive on its own: a dongle that tracked the headset's battery would have a charging state to report, and this one is silent.
 
-Byte 1 of the `0x0CD5` response repeatedly came back as `0x61`, `0x62`, `0x63` at exactly the moments the indications reported 97%, 98% and 99%, which looks like a pollable battery hiding in the address response. It is not. Queried while linked it returns `0x00` every time. The byte is a stale shared buffer that sometimes still holds the last indication's value, and the published reading of it as an earbud selector is correct.
+The remaining candidate, `0x2CD0`, is not a battery either. Across one power cycle it reported:
 
-Every frame is logged, which is the raw material for anyone wanting to push this further:
-
-```bash
-bin/headroomctl.py --frames
 ```
+75  85 90 95 100  90 80 65 50 35 25 20 15 10 5 0
+```
+
+That is a fade envelope ramping up and back down over about a second, almost certainly the startup sound or haptic ramp. `0x0CD6` behaves the same way. Both are continuous controls being echoed, not state.
+
+### Why `0x0CD6` is refused, in hindsight
+
+The clue was there from the first hour and was misread. `0x0CD6` asks *the chip you are talking to* for its battery. Over USB that chip is the **dongle**, and the dongle has no battery, so it answers with an error. It was never going to work, and no argument to it would have helped. Reading the headset's battery would need a relay command in the dongle's own `0x2Cxx` family, and nothing resembling one has been observed.
+
+If you want the headset's battery on Linux today, pair it over Bluetooth: BlueZ and UPower expose it with no custom code. That costs the headset's single Bluetooth slot, which is exactly what this project existed to avoid.
 
 ## The protocol
 
@@ -64,7 +79,9 @@ A third trap cost real time here: the frames worth having arrive in a **backlog*
 | `0x0301` | SDK version | ERNW |
 | `0x1E08` | Build version | ERNW |
 | `0x0CD5` | Bluetooth address | ERNW |
-| `0x0CD6` | Battery level, as a `0x5D` indication | HyperHeadset |
+| `0x0CD6` | A continuous control, ramping. **Not battery**, despite HyperHeadset reading it as one over BLE on another device | observed here |
+| `0x2CD0` | A fade envelope, ramping to 100 and back to 0 | observed here |
+| `0x2C80` | Link up (`03`) / link down (`01`) | observed here |
 | `0x0F92` | Firmware debug log | observed here |
 | `0x2CB1` | Headset link state | observed here |
 
@@ -90,10 +107,6 @@ The daemon is idle-cheap by design, which took a second pass to achieve.
 The dongle answers only `GET_REPORT`; it never pushes on its interrupt endpoint, verified by waiting on the hidraw node with a reply outstanding and seeing nothing. So reads have to be polled. But it buffers frames, so polling fast buys nothing: Headroom reads once a second at rest and drops to 5 ms the moment a frame appears, draining a burst at full speed before easing back. Idle CPU is below what `/proc` can resolve over ten seconds.
 
 The state file is written only when a value actually changes, not on a timer. Readers derive age from the stored timestamp, so a still-correct file never needs rewriting. At rest it is not touched at all.
-
-### One oddity
-
-A single link-up emits several battery indications within the same second, and they disagree slightly. One observed burst read 98, 97, 96, 99, 100, 99. Headroom takes the last. Treat the number as accurate to a couple of percent rather than exact.
 
 ## Notes for plugin authors
 

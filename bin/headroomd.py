@@ -28,7 +28,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from headroom_race import (  # noqa: E402
-    DeviceGone, OP_BATTERY, Race, T_IND, find_node,
+    DeviceGone, Race, find_node,
 )
 
 # The dongle announces the headset link on this opcode. Byte 2 is the link flag
@@ -135,11 +135,11 @@ class Publisher:
                 previous = json.load(fh)
         except (OSError, ValueError):
             return
-        level = previous.get("percent")
-        when = previous.get("updated")
-        if isinstance(level, int) and 0 <= level <= 100 and isinstance(when, (int, float)):
-            self.percent = level
-            self.percent_at = when
+        # Deliberately not restoring "percent": every value ever written to it
+        # came from an opcode that turned out not to be the battery. Restoring
+        # one would resurrect a wrong number across a restart.
+        if previous.get("percent") is not None:
+            return
 
     def note_frame(self, frame):
         """Append to the frame log, trimming it when it gets large."""
@@ -205,16 +205,11 @@ def handle_frame(pub, frame, verbose):
     if verbose:
         print(f"  {frame}", flush=True)
 
-    if frame.opcode == OP_BATTERY and frame.type == T_IND and frame.payload:
-        level = frame.payload[0]
-        if 0 <= level <= 100:
-            pub.percent = level
-            pub.percent_at = time.time()
-            if verbose:
-                print(f"headroomd: battery {level}%", flush=True)
-            pub.publish()
-
-    elif frame.opcode == OP_LINK_STATE and len(frame.payload) >= 10:
+    # No battery source is currently known. 0x0CD6 was used here and was wrong;
+    # see headroom_race.py. Publishing a number from an unidentified opcode is
+    # worse than publishing nothing, because a confident wrong battery level
+    # makes people charge a headset that does not need it.
+    if frame.opcode == OP_LINK_STATE and len(frame.payload) >= 10:
         pub.linked = bool(frame.payload[2])
         addr = frame.payload[4:10][::-1]
         pub.headset_addr = ":".join(f"{b:02x}" for b in addr)
@@ -262,7 +257,7 @@ def serve(pub, verbose, poll_interval):
                 pass
             pub.publish()
 
-            next_poll = time.time() + poll_interval if poll_interval else None
+            next_poll = None
             delay = IDLE_DELAY
             while not STOP:
                 # Frames reach the publisher through the callback. Speed up the
@@ -273,9 +268,6 @@ def serve(pub, verbose, poll_interval):
                 else:
                     delay = min(delay * 2.0, IDLE_DELAY)
 
-                if next_poll and time.time() >= next_poll:
-                    race.send(OP_BATTERY)
-                    next_poll = time.time() + poll_interval
 
                 time.sleep(delay)
         except DeviceGone:
