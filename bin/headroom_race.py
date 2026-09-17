@@ -40,23 +40,23 @@ OP_BD_ADDRESS = 0x0CD5
 OP_BUILD_VERSION = 0x1E08
 OP_FIRMWARE_LOG = 0x0F92          # continuous debug text; always discarded
 
-# Battery level, but only the FIRST value of each burst.
+# Battery level, as the LAST value of each burst.
 #
-# On link-up the dongle sends a descending run of indications on this opcode:
-# 99, 98, 97, or 60 counting down to 26. The run is a gauge animation; it
-# STARTS at the real level and counts down from there. Taking the last value,
-# as this project did at first, reports a number far below the truth.
+# On link-up the dongle sends a descending run on this opcode, for example
+# 99 98 97, or 60 counting down to 26. The run settles ON the real level: it
+# is a gauge animation that finishes at the truth, not one that starts there.
 #
-# Two things that looked like proof this was not a battery were the opposite:
-# the same run repeating across several link-ups just means the level had not
-# changed between them, and a run of 32 values inside one second is an
-# animation frame rate, not a discharge rate. The first values across one day
-# read 60, 60, 60, 46, 46, 15, 15, 15, 15, then 99 after a charge, which is a
-# discharge curve and nothing else.
+# Verified against the level the headset reported over Bluetooth at the same
+# moment, twice: a [99, 98, 97] burst while the phone said 97, and a
+# [99, 98, 97, 97, 96] burst while the phone said 96.
+#
+# Do not be tempted by the first value. Both ends of a descending run move
+# together, so first-values also trace a plausible-looking discharge curve
+# across a day; that curve is an artifact and reads about three points high.
+# The phone is the only thing that settles it.
 OP_BATTERY = 0x0CD6
 
-# How long a gap ends a burst. Values arriving closer together than this are
-# the animation tail and must be ignored.
+# A gap this long ends a burst. The level is whatever arrived last before it.
 BATTERY_BURST_GAP = 2.0
 
 # Also not identified. Moves in steps of 5, which looks like a volume, but it

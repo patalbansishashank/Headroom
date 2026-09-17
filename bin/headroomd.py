@@ -122,6 +122,7 @@ class Publisher:
         self._last_emitted = None
         self._last_written = None
         self.last_battery_frame = 0.0
+        self.burst = []              # values of the run currently arriving
 
     def _restore(self):
         """Carry the last known level across a restart.
@@ -207,21 +208,13 @@ def handle_frame(pub, frame, verbose):
         print(f"  {frame}", flush=True)
 
     if frame.opcode == OP_BATTERY and frame.type == T_IND and frame.payload:
-        now = time.time()
-        first_of_burst = now - pub.last_battery_frame > BATTERY_BURST_GAP
-        pub.last_battery_frame = now
-        # Only the opening value is the level; the rest of the run is the
-        # gauge animation counting down from it.
-        if first_of_burst:
-            level = frame.payload[0]
-            if 0 < level <= 100:
-                pub.percent = level
-                pub.percent_at = now
-                if verbose:
-                    print(f"headroomd: battery {level}%", flush=True)
-                pub.publish()
-        elif verbose:
-            print(f"  (animation tail {frame.payload[0]}, ignored)", flush=True)
+        # Collect the run; the level is whatever it settles on. Committing
+        # each value as it arrives would flicker the bar through the whole
+        # animation before landing on the right number.
+        if time.time() - pub.last_battery_frame > BATTERY_BURST_GAP:
+            pub.burst = []
+        pub.burst.append(frame.payload[0])
+        pub.last_battery_frame = time.time()
 
     elif frame.opcode == OP_LINK_STATE and len(frame.payload) >= 10:
         pub.linked = bool(frame.payload[2])
@@ -231,6 +224,24 @@ def handle_frame(pub, frame, verbose):
             print(f"headroomd: headset {'linked' if pub.linked else 'gone'} "
                   f"({pub.headset_addr})", flush=True)
         pub.publish()
+
+
+def commit_burst(pub, verbose):
+    """Publish the level once the run has stopped arriving."""
+    if not pub.burst:
+        return
+    if time.time() - pub.last_battery_frame <= BATTERY_BURST_GAP:
+        return
+    run, pub.burst = pub.burst, []
+    level = run[-1]
+    if 0 < level <= 100:
+        pub.percent = level
+        pub.percent_at = pub.last_battery_frame
+        if verbose:
+            print(f"headroomd: battery {level}%  (burst {run})", flush=True)
+        pub.publish()
+    elif verbose:
+        print(f"headroomd: ignoring out-of-range burst {run}", flush=True)
 
 
 def serve(pub, verbose, poll_interval):
@@ -281,6 +292,7 @@ def serve(pub, verbose, poll_interval):
                     delay = BUSY_DELAY
                 else:
                     delay = min(delay * 2.0, IDLE_DELAY)
+                commit_burst(pub, verbose)
 
 
                 time.sleep(delay)

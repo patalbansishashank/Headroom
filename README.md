@@ -17,31 +17,32 @@ Working. The battery level is real, and it is the **first** value of each burst.
 | Detect the headset linking and unlinking | Working |
 | Read battery level | Working, refreshes when the headset links |
 
-### The trap, and it caught this project twice
+### The trap, and it caught this project three times
 
 On link-up the dongle sends a descending run of indications on `0x0CD6`:
 
 ```
 99 98 97
+99 98 97 97 96
 60 59 58 57 ... 27 26
-15 14 13 12
 ```
 
-The run is a gauge animation. It **starts** at the real level and counts down from there. Read the last value and you report a number far below the truth; read the first and it is correct.
+**The level is the value it settles on, not the one it starts from.** The run is a gauge animation that finishes at the truth.
 
-Worse, two things that look like proof this is not a battery are the exact opposite:
+This project got it wrong in both directions before measuring against an independent source:
 
-- **The identical run repeats across separate link-ups.** That is not a malfunction, it means the level did not change between them.
-- **Thirty-two values arrive inside one second.** That is an animation frame rate, not a discharge rate.
+1. Took the last value. Correct, but unverified.
+2. Took the first value, on the reasoning that a battery cannot sweep 32 points in a second and that an identical run repeating across link-ups was suspicious. Both observations are real; neither supports the conclusion. The sweep is an animation frame rate, and a repeated run just means the level had not changed.
+3. Concluded it was not a battery at all and removed the feature.
 
-Reading those backwards, this project first reported the tail as the level, then concluded from the same evidence that the opcode was not a battery at all and removed the feature. Both were wrong. What settled it was a full day of first-values:
+What settles it is the level the headset reports over Bluetooth at the same moment:
 
-```
-09:53  60      14:15  46      16:04  15      19:25  99
-09:54  60      14:46  46      18:41  15  ×3
-```
+| Burst | first | last | Phone |
+| --- | --- | --- | --- |
+| `[99, 98, 97]` | 99 | **97** | 97 |
+| `[99, 98, 97, 97, 96]` | 99 | **96** | 96 |
 
-A discharge curve through the day, then a charge. Confirmed against the level the headset itself reported over Bluetooth at the same moment.
+Beware the first value specifically: because both ends of a descending run move together, first-values also trace a plausible discharge curve across a day. That curve looks convincing and reads about three points high. Only an independent reading distinguishes them.
 
 ### What it does not do
 
@@ -76,7 +77,7 @@ A third trap cost real time here: the frames worth having arrive in a **backlog*
 | `0x0301` | SDK version | ERNW |
 | `0x1E08` | Build version | ERNW |
 | `0x0CD5` | Bluetooth address | ERNW |
-| `0x0CD6` | Battery level, as the **first** value of a descending burst | HyperHeadset, corrected here |
+| `0x0CD6` | Battery level, as the **last** value of a descending burst | HyperHeadset, verified here |
 | `0x2CD0` | A fade envelope, ramping to 100 and back to 0. Not battery | observed here |
 | `0x2C80` | Link up (`03`) / link down (`01`) | observed here |
 | `0x0F92` | Firmware debug log | observed here |
