@@ -28,7 +28,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from headroom_race import (  # noqa: E402
-    DeviceGone, Race, find_node,
+    BATTERY_BURST_GAP, DeviceGone, OP_BATTERY, Race, T_IND, find_node,
 )
 
 # The dongle announces the headset link on this opcode. Byte 2 is the link flag
@@ -121,6 +121,7 @@ class Publisher:
         self.emit = False            # also print a JSON line on every change
         self._last_emitted = None
         self._last_written = None
+        self.last_battery_frame = 0.0
 
     def _restore(self):
         """Carry the last known level across a restart.
@@ -135,11 +136,11 @@ class Publisher:
                 previous = json.load(fh)
         except (OSError, ValueError):
             return
-        # Deliberately not restoring "percent": every value ever written to it
-        # came from an opcode that turned out not to be the battery. Restoring
-        # one would resurrect a wrong number across a restart.
-        if previous.get("percent") is not None:
-            return
+        level = previous.get("percent")
+        when = previous.get("updated")
+        if isinstance(level, int) and 0 < level <= 100 and isinstance(when, (int, float)):
+            self.percent = level
+            self.percent_at = when
 
     def note_frame(self, frame):
         """Append to the frame log, trimming it when it gets large."""
@@ -205,11 +206,24 @@ def handle_frame(pub, frame, verbose):
     if verbose:
         print(f"  {frame}", flush=True)
 
-    # No battery source is currently known. 0x0CD6 was used here and was wrong;
-    # see headroom_race.py. Publishing a number from an unidentified opcode is
-    # worse than publishing nothing, because a confident wrong battery level
-    # makes people charge a headset that does not need it.
-    if frame.opcode == OP_LINK_STATE and len(frame.payload) >= 10:
+    if frame.opcode == OP_BATTERY and frame.type == T_IND and frame.payload:
+        now = time.time()
+        first_of_burst = now - pub.last_battery_frame > BATTERY_BURST_GAP
+        pub.last_battery_frame = now
+        # Only the opening value is the level; the rest of the run is the
+        # gauge animation counting down from it.
+        if first_of_burst:
+            level = frame.payload[0]
+            if 0 < level <= 100:
+                pub.percent = level
+                pub.percent_at = now
+                if verbose:
+                    print(f"headroomd: battery {level}%", flush=True)
+                pub.publish()
+        elif verbose:
+            print(f"  (animation tail {frame.payload[0]}, ignored)", flush=True)
+
+    elif frame.opcode == OP_LINK_STATE and len(frame.payload) >= 10:
         pub.linked = bool(frame.payload[2])
         addr = frame.payload[4:10][::-1]
         pub.headset_addr = ":".join(f"{b:02x}" for b in addr)

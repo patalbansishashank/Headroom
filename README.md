@@ -1,8 +1,6 @@
 # Headroom
 
-Talks to the **Skullcandy Crusher PLYR 720** dongle over its vendor protocol from Linux, and reports headset link state in the [Noctalia](https://github.com/noctalia-dev/noctalia-shell) bar.
-
-It was built to read the battery level. It cannot: the dongle does not expose one. See Status.
+Battery level for the **Skullcandy Crusher PLYR 720** in the [Noctalia](https://github.com/noctalia-dev/noctalia-shell) bar, read over the headset's 2.4 GHz USB dongle.
 
 Pairing the headset to the PC over Bluetooth would also surface a battery level, through BlueZ and UPower, with no custom code at all. That is not what this is for. The PLYR 720 has exactly one Bluetooth slot, and the point here is to spend it on a phone while the PC talks to the dongle.
 
@@ -10,45 +8,44 @@ Skullcandy ships no Linux software, and the headset is not supported by [Headset
 
 ## Status
 
-**The dongle does not expose the headset's battery.** Everything else works. This is a negative result, arrived at by measurement rather than assumption, and it is documented here so nobody repeats the search.
+Working. The battery level is real, and it is the **first** value of each burst.
 
 | Capability | State |
 | --- | --- |
 | Talk to the dongle over its vendor protocol | Working |
 | Read firmware identity and Bluetooth address | Working |
 | Detect the headset linking and unlinking | Working |
-| Read battery level | **Not available** |
+| Read battery level | Working, refreshes when the headset links |
 
-### How that was established
+### The trap, and it caught this project twice
 
-An earlier version of this project reported a battery percentage. It was wrong. The value came from opcode `0x0CD6`, taken from the HyperHeadset project, which reads it over Bluetooth on a HyperX headset. On this dongle that opcode emits long monotonic runs, dozens of values within a single second, stepping by one, and the identical run repeats across unrelated events. Taking the last value of each run produced a number that looked like a battery and was not one.
-
-A controlled elimination run settled it. Each action was performed deliberately while every frame was recorded:
-
-| Action | Frames produced |
-| --- | --- |
-| Idle | 0 |
-| Bass slider through its full range | 0 |
-| Volume up and down | 0 |
-| **Power cycle** | **40** |
-| Charger plugged in | 0 |
-| Charger unplugged | 0 |
-
-Only the link transition says anything at all. Plugging a charger into the headset produces **nothing**, which is close to conclusive on its own: a dongle that tracked the headset's battery would have a charging state to report, and this one is silent.
-
-The remaining candidate, `0x2CD0`, is not a battery either. Across one power cycle it reported:
+On link-up the dongle sends a descending run of indications on `0x0CD6`:
 
 ```
-75  85 90 95 100  90 80 65 50 35 25 20 15 10 5 0
+99 98 97
+60 59 58 57 ... 27 26
+15 14 13 12
 ```
 
-That is a fade envelope ramping up and back down over about a second, almost certainly the startup sound or haptic ramp. `0x0CD6` behaves the same way. Both are continuous controls being echoed, not state.
+The run is a gauge animation. It **starts** at the real level and counts down from there. Read the last value and you report a number far below the truth; read the first and it is correct.
 
-### Why `0x0CD6` is refused, in hindsight
+Worse, two things that look like proof this is not a battery are the exact opposite:
 
-The clue was there from the first hour and was misread. `0x0CD6` asks *the chip you are talking to* for its battery. Over USB that chip is the **dongle**, and the dongle has no battery, so it answers with an error. It was never going to work, and no argument to it would have helped. Reading the headset's battery would need a relay command in the dongle's own `0x2Cxx` family, and nothing resembling one has been observed.
+- **The identical run repeats across separate link-ups.** That is not a malfunction, it means the level did not change between them.
+- **Thirty-two values arrive inside one second.** That is an animation frame rate, not a discharge rate.
 
-If you want the headset's battery on Linux today, pair it over Bluetooth: BlueZ and UPower expose it with no custom code. That costs the headset's single Bluetooth slot, which is exactly what this project existed to avoid.
+Reading those backwards, this project first reported the tail as the level, then concluded from the same evidence that the opcode was not a battery at all and removed the feature. Both were wrong. What settled it was a full day of first-values:
+
+```
+09:53  60      14:15  46      16:04  15      19:25  99
+09:54  60      14:46  46      18:41  15  ×3
+```
+
+A discharge curve through the day, then a charge. Confirmed against the level the headset itself reported over Bluetooth at the same moment.
+
+### What it does not do
+
+The level is pushed only when the headset links, never on request: a direct query for `0x0CD6` is refused, because over USB that asks the **dongle** for its own battery and the dongle has no battery. Charger events produce no frames at all. So the number is correct as of the last link, and the widget timestamps it rather than implying it is live. To refresh it, power the headset off and on.
 
 ## The protocol
 
@@ -79,8 +76,8 @@ A third trap cost real time here: the frames worth having arrive in a **backlog*
 | `0x0301` | SDK version | ERNW |
 | `0x1E08` | Build version | ERNW |
 | `0x0CD5` | Bluetooth address | ERNW |
-| `0x0CD6` | A continuous control, ramping. **Not battery**, despite HyperHeadset reading it as one over BLE on another device | observed here |
-| `0x2CD0` | A fade envelope, ramping to 100 and back to 0 | observed here |
+| `0x0CD6` | Battery level, as the **first** value of a descending burst | HyperHeadset, corrected here |
+| `0x2CD0` | A fade envelope, ramping to 100 and back to 0. Not battery | observed here |
 | `0x2C80` | Link up (`03`) / link down (`01`) | observed here |
 | `0x0F92` | Firmware debug log | observed here |
 | `0x2CB1` | Headset link state | observed here |

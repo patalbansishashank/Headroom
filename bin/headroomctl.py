@@ -55,7 +55,7 @@ def describe(state):
     if percent is None:
         linked = state.get("linked")
         where = "headset off" if linked is False else "headset connected"
-        return "", f"PLYR 720 {where}; no battery level (the dongle does not report one)", "headphones", "none"
+        return "", f"PLYR 720 {where}; battery not reported yet", "headphones", "none"
     updated = state.get("updated")
     age = 0 if updated is None else max(0.0, time.time() - updated)
     if age > STALE_AFTER:

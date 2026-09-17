@@ -40,13 +40,24 @@ OP_BD_ADDRESS = 0x0CD5
 OP_BUILD_VERSION = 0x1E08
 OP_FIRMWARE_LOG = 0x0F92          # continuous debug text; always discarded
 
-# NOT the battery, despite what the HyperHeadset project reports for a
-# different Airoha headset over BLE. On this dongle 0x0CD6 emits long
-# monotonic runs of values, dozens at a time within a single second, stepping
-# by one, and the identical run repeats across unrelated events. A battery
-# cannot do that. It is almost certainly a continuous control (the Crusher has
-# a haptic bass slider) being echoed as it moves.
-OP_SWEEP_CONTROL = 0x0CD6
+# Battery level, but only the FIRST value of each burst.
+#
+# On link-up the dongle sends a descending run of indications on this opcode:
+# 99, 98, 97, or 60 counting down to 26. The run is a gauge animation; it
+# STARTS at the real level and counts down from there. Taking the last value,
+# as this project did at first, reports a number far below the truth.
+#
+# Two things that looked like proof this was not a battery were the opposite:
+# the same run repeating across several link-ups just means the level had not
+# changed between them, and a run of 32 values inside one second is an
+# animation frame rate, not a discharge rate. The first values across one day
+# read 60, 60, 60, 46, 46, 15, 15, 15, 15, then 99 after a charge, which is a
+# discharge curve and nothing else.
+OP_BATTERY = 0x0CD6
+
+# How long a gap ends a burst. Values arriving closer together than this are
+# the animation tail and must be ignored.
+BATTERY_BURST_GAP = 2.0
 
 # Also not identified. Moves in steps of 5, which looks like a volume, but it
 # does not track the host sink volume.

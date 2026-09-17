@@ -81,14 +81,14 @@ Item {
       if (!root.hasReading) {
         var head = root.linked === false ? "PLYR 720\nHeadset off"
                                          : "PLYR 720\nHeadset connected"
-        return head + "\n\nNo battery level: the dongle does not report one.\nPlugging the charger in produces no frames at all."
+        return head + "\nBattery not reported yet; it arrives when the headset links"
       }
 
       var lines = [`Crusher PLYR 720: ${root.percent}%`]
       if (root.ageSeconds > 120 && root.main?.updatedAt) {
         lines.push("Measured at " + Qt.formatTime(new Date(root.main.updatedAt), "HH:mm"))
         // Worth saying plainly: this is not a number that ticks down live.
-        lines.push("Refreshes when the headset is powered on")
+        lines.push("Refreshes when the headset links")
       }
       if (root.linked === false)
         lines.push("Headset is currently off")
