@@ -1,6 +1,5 @@
 import QtQuick
 import QtQuick.Layouts
-import QtQuick.Shapes
 import Quickshell
 import qs.Commons
 import qs.Services.UI
@@ -79,10 +78,11 @@ Item {
   }
 
   // ---- geometry (BarPill's own numbers) ----------------------------------
-  readonly property real ringSize: Math.round(capsuleHeight * 0.78)
-  readonly property real ringStroke: Math.max(2, Math.round(ringSize * 0.12))
-  readonly property real glyphSize: Math.round(ringSize * 0.46)
-  readonly property real gaugeSpacing: Math.round(capsuleHeight * 0.16)
+  // The glyph IS the gauge, so it gets the full capsule height rather than
+  // being shrunk to sit inside a ring.
+  readonly property real glyphSize: Style.toOdd(capsuleHeight * 0.52)
+  readonly property real gaugeSize: Math.round(capsuleHeight * 0.74)
+  readonly property real gaugeSpacing: Math.round(capsuleHeight * 0.22)
 
   readonly property real contentWidth: isVertical
     ? capsuleHeight
@@ -115,6 +115,10 @@ Item {
     Repeater {
       model: root.shown
 
+      // The charge fills the device's own glyph from the bottom, like a
+      // vessel: the unfilled part stays as a faint outline of the same shape,
+      // so the icon still reads as a headset or a mouse at a glance. Two
+      // copies of the glyph, identical geometry, the upper one clipped.
       delegate: Item {
         id: gauge
         required property var modelData
@@ -123,85 +127,76 @@ Item {
         readonly property bool hasLevel: percent !== null && percent !== undefined
         readonly property real fraction: hasLevel ? Math.max(0, Math.min(100, percent)) / 100 : 0
         readonly property color tint: root.levelColor(hasLevel ? percent : null)
-        // Old readings fade rather than disappear: still true, just not fresh.
+        readonly property string glyph: modelData.icon || "battery"
+
+        // Old readings fade rather than vanish: still true, just not fresh.
         readonly property real freshness: {
           root.main ? root.main.ageTick : 0          // re-evaluate as time passes
           var age = root.main ? root.main.ageOf(modelData) : -1
           return (age >= 0 && age > 3600) ? 0.55 : 1.0
         }
 
-        implicitWidth: root.ringSize
-        implicitHeight: root.ringSize
+        implicitWidth: root.gaugeSize
+        implicitHeight: root.gaugeSize
         opacity: freshness
 
         Behavior on opacity {
           NumberAnimation { duration: Style.animationNormal }
         }
 
-        Shape {
+        // The empty part: the whole glyph, faint.
+        NIcon {
+          id: emptyGlyph
           anchors.fill: parent
-          asynchronous: false
-          preferredRendererType: Shape.CurveRenderer
+          horizontalAlignment: Text.AlignHCenter
+          verticalAlignment: Text.AlignVCenter
+          icon: gauge.glyph
+          pointSize: root.glyphSize
+          applyUiScale: false
+          color: Qt.rgba(Color.mOnSurfaceVariant.r, Color.mOnSurfaceVariant.g,
+                         Color.mOnSurfaceVariant.b, gauge.hasLevel ? 0.32 : 0.55)
+        }
 
-          // Track: the empty part of the circle.
-          ShapePath {
-            // A brighter track is the charging cue: no animation, so it
-            // costs nothing to show continuously.
-            strokeColor: modelData.charging
-              ? Qt.rgba(root.colorFull.r, root.colorFull.g, root.colorFull.b, 0.38)
-              : Qt.rgba(Color.mOnSurfaceVariant.r, Color.mOnSurfaceVariant.g,
-                        Color.mOnSurfaceVariant.b, 0.30)
-            strokeWidth: root.ringStroke
-            fillColor: "transparent"
-            capStyle: ShapePath.FlatCap
+        // The charged part: the same glyph, clipped to the bottom fraction.
+        // Both copies share the gauge's bottom edge, so they line up exactly.
+        Item {
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.bottom: parent.bottom
+          height: parent.height * gauge.fraction
+          clip: true
+          visible: gauge.hasLevel
 
-            PathAngleArc {
-              centerX: gauge.width / 2
-              centerY: gauge.height / 2
-              radiusX: (gauge.width - root.ringStroke) / 2
-              radiusY: (gauge.height - root.ringStroke) / 2
-              startAngle: -90
-              sweepAngle: 360
-            }
+          Behavior on height {
+            NumberAnimation { duration: Style.animationNormal; easing.type: Easing.OutCubic }
           }
 
-          // Charge: filled clockwise from the top.
-          ShapePath {
-            strokeColor: gauge.tint
-            strokeWidth: root.ringStroke
-            fillColor: "transparent"
-            capStyle: ShapePath.RoundCap
+          NIcon {
+            width: gauge.width
+            height: gauge.height
+            anchors.bottom: parent.bottom
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
+            icon: gauge.glyph
+            pointSize: root.glyphSize
+            applyUiScale: false
+            color: gauge.tint
 
-            Behavior on strokeColor {
+            Behavior on color {
               ColorAnimation { duration: Style.animationNormal }
-            }
-
-            PathAngleArc {
-              id: arc
-              centerX: gauge.width / 2
-              centerY: gauge.height / 2
-              radiusX: (gauge.width - root.ringStroke) / 2
-              radiusY: (gauge.height - root.ringStroke) / 2
-              startAngle: -90
-              sweepAngle: gauge.fraction * 360
-
-              Behavior on sweepAngle {
-                NumberAnimation { duration: Style.animationNormal; easing.type: Easing.OutCubic }
-              }
             }
           }
         }
 
-        NIcon {
-          anchors.centerIn: parent
-          icon: modelData.icon || "battery"
-          pointSize: root.glyphSize
+        // Charging: a hairline under the glyph, static so it costs nothing.
+        Rectangle {
+          visible: modelData.charging
+          anchors.horizontalCenter: parent.horizontalCenter
+          anchors.bottom: parent.bottom
+          width: Math.round(parent.width * 0.62)
+          height: Math.max(1, Math.round(parent.height * 0.08))
+          radius: height / 2
           color: gauge.tint
-          applyUiScale: false
-
-          Behavior on color {
-            ColorAnimation { duration: Style.animationNormal }
-          }
         }
       }
     }

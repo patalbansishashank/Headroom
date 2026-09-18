@@ -186,7 +186,6 @@ class PlyrHeadsetSource(PushedSource):
         from headroom_race import BATTERY_BURST_GAP, OP_BATTERY, T_IND
 
         OP_LINK_STATE = 0x2CB1
-        burst, last_frame_at, linked = [], 0.0, None
 
         while not should_stop():
             node = race.find_node()
@@ -200,15 +199,24 @@ class PlyrHeadsetSource(PushedSource):
                 time.sleep(2.0)
                 continue
 
+            # The dongle is attached. Say so now rather than waiting for a
+            # battery burst: those only arrive when the headset links, which
+            # may be hours away, and until then the widget would claim the
+            # headset is disconnected while the user is listening to it.
+            state = {"burst": [], "last": 0.0, "linked": None}
+            emit(Reading(present=True))
+
             def on_frame(frame):
-                nonlocal burst, last_frame_at, linked
                 if frame.opcode == OP_BATTERY and frame.type == T_IND and frame.payload:
-                    if time.time() - last_frame_at > BATTERY_BURST_GAP:
-                        burst = []
-                    burst.append(frame.payload[0])
-                    last_frame_at = time.time()
+                    if time.time() - state["last"] > BATTERY_BURST_GAP:
+                        state["burst"] = []
+                    state["burst"].append(frame.payload[0])
+                    state["last"] = time.time()
                 elif frame.opcode == OP_LINK_STATE and len(frame.payload) >= 3:
                     linked = bool(frame.payload[2])
+                    if linked != state["linked"]:
+                        state["linked"] = linked
+                        emit(Reading(present=linked))
 
             dev.on_frame = on_frame
             delay = 1.0
@@ -222,11 +230,13 @@ class PlyrHeadsetSource(PushedSource):
                             delay = min(delay * 2.0, 1.0)
                         # The run is a gauge animation; the level is where it
                         # settles, so commit only once it has stopped arriving.
-                        if burst and time.time() - last_frame_at > BATTERY_BURST_GAP:
-                            run, burst = burst, []
+                        if state["burst"] and time.time() - state["last"] > BATTERY_BURST_GAP:
+                            run, state["burst"] = state["burst"], []
                             level = run[-1]
                             if 0 < level <= 100:
-                                emit(Reading(percent=level, present=True, at=last_frame_at))
+                                emit(Reading(percent=level,
+                                             present=state["linked"] is not False,
+                                             at=state["last"]))
                         time.sleep(delay)
             except race.DeviceGone:
                 emit(Reading(present=False))

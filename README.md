@@ -2,7 +2,7 @@
 
 Battery levels for wireless peripherals, as ring gauges in the [Noctalia](https://github.com/noctalia-dev/noctalia-shell) bar.
 
-One ring per device. The arc is the charge, the glyph says which device, and the colour says whether you need to care.
+One gauge per device, and the gauge is the device's own icon. The charge fills the glyph from the bottom like a vessel; the unfilled part stays as a faint outline of the same shape, so a headset still reads as a headset. The colour says whether you need to care.
 
 | Device | How it is read | Refreshes |
 | --- | --- | --- |
@@ -12,6 +12,7 @@ One ring per device. The arc is the charge, the glyph says which device, and the
 Neither is supported by any existing Linux tool. The headset is unknown to [HeadsetControl](https://github.com/Sapd/HeadsetControl) and Skullcandy ships nothing for Linux; the mouse's own configurator is a Windows application and a WebHID page.
 
 ## Colour
+
 
 White while there is nothing to think about, easing into amber as the charge runs down and into red when it is urgent. The bands are transitions, not steps:
 
