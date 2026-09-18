@@ -4,16 +4,15 @@ import qs.Commons
 import qs.Services.UI
 import qs.Widgets
 
-// Headroom settings. There is deliberately very little here: the battery level
-// is pushed by the dongle rather than polled, so there is no interval to tune.
+// Headroom settings. Deliberately small: levels are pushed by the hardware
+// rather than polled on a schedule, so there is no interval to tune.
 ColumnLayout {
   id: root
 
   property var pluginApi: null
 
-  property string editDisplayMode: "alwaysShow"
-  property int  editWarnBelow: 15
   property bool editHideWhenUnavailable: false
+  property bool editHideAbsent: true
   property bool _loaded: false
 
   spacing: Style.marginL
@@ -25,9 +24,8 @@ ColumnLayout {
       return
     _loaded = false
     var s = pluginApi.pluginSettings
-    editDisplayMode = s.displayMode || "alwaysShow"
-    editWarnBelow = s.warnBelow ?? 15
     editHideWhenUnavailable = s.hideWhenUnavailable ?? false
+    editHideAbsent = s.hideAbsentDevices ?? true
     _loaded = true
   }
 
@@ -35,57 +33,32 @@ ColumnLayout {
     if (!pluginApi || !_loaded)
       return
     var s = pluginApi.pluginSettings
-    s.displayMode = editDisplayMode
-    s.warnBelow = Math.max(0, Math.min(100, editWarnBelow))
     s.hideWhenUnavailable = editHideWhenUnavailable
+    s.hideAbsentDevices = editHideAbsent
     pluginApi.saveSettings()
   }
 
   NHeader {
     Layout.fillWidth: true
-    label: "Headset battery"
-    description: "Reads the Crusher PLYR 720 through its 2.4 GHz dongle, so the headset's Bluetooth stays free for your phone."
+    label: "Peripheral batteries"
+    description: "One ring per device. The ring fills with the charge and shifts from white through amber to red as it runs down."
   }
 
-  NComboBox {
+  NToggle {
     Layout.fillWidth: true
-    label: "Display mode"
-    description: "Whether the percentage sits beside the icon, or only appears on hover."
-    minimumWidth: 200
-    model: [
-      { "key": "alwaysShow", "name": "Always show" },
-      { "key": "onhover", "name": "On hover" },
-      { "key": "alwaysHide", "name": "Icon only" }
-    ]
-    currentKey: root.editDisplayMode
-    defaultValue: "alwaysShow"
-    onSelected: (key) => {
-      root.editDisplayMode = key
+    label: "Hide disconnected devices"
+    description: "On: a device drops out of the bar once it is gone and has no last-known level. Off: it stays, greyed."
+    checked: root.editHideAbsent
+    onToggled: (v) => {
+      root.editHideAbsent = v
       root.saveSettings()
-    }
-  }
-
-  NSpinBox {
-    Layout.fillWidth: true
-    label: "Warn below"
-    description: "The level turns red at or under this percentage."
-    from: 0
-    to: 100
-    stepSize: 5
-    suffix: "%"
-    value: root.editWarnBelow
-    onValueChanged: {
-      if (root._loaded && value !== root.editWarnBelow) {
-        root.editWarnBelow = value
-        root.saveSettings()
-      }
     }
   }
 
   NToggle {
     Layout.fillWidth: true
-    label: "Hide when unavailable"
-    description: "Off: the widget stays in the bar with a struck-through headphone icon when the dongle is unplugged. On: it disappears entirely."
+    label: "Hide the widget when empty"
+    description: "On: nothing to show means nothing in the bar. Off: the capsule stays put so the bar does not shift around."
     checked: root.editHideWhenUnavailable
     onToggled: (v) => {
       root.editHideWhenUnavailable = v
@@ -97,21 +70,22 @@ ColumnLayout {
 
   NLabel {
     Layout.fillWidth: true
-    label: "Status"
+    label: "Devices"
     description: {
       if (!root.main)
         return "Plugin is not running."
-      if (!root.main.donglePresent)
-        return "Dongle not detected. Check that it is plugged in, and that udev/70-skullcandy-plyr.rules is installed."
-      var lines = ["Dongle connected."]
-      if (root.main.hasReading) {
-        lines.push(`Last reported ${root.main.percent}%.`)
-      } else {
-        lines.push("No battery level reported yet. The dongle pushes the level rather than answering a request, so this fills in when the headset next reports.")
+      var list = root.main.devices || []
+      if (list.length === 0)
+        return "No known devices detected."
+      var lines = []
+      for (var i = 0; i < list.length; i++) {
+        var d = list[i]
+        var state = (d.percent === null || d.percent === undefined)
+          ? (d.present ? "connected, no level reported yet" : "not connected")
+          : d.percent + "%" + (d.charging ? ", charging" : "")
+        lines.push(d.name + " — " + state + (d.note ? ". " + d.note + "." : ""))
       }
-      if (root.main.linked === false)
-        lines.push("Headset is currently off.")
-      return lines.join(" ")
+      return lines.join("\n")
     }
   }
 

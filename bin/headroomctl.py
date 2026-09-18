@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Headroom CLI: read what the daemon published, or talk to the dongle directly.
+Headroom CLI: read what the daemon published, or query a device directly.
 
-  headroomctl.py              last known battery level, plain text
-  headroomctl.py --json       one JSON object (Noctalia CustomButton shape)
-  headroomctl.py --identify   firmware identity, straight from the dongle
-  headroomctl.py --watch      follow the state file as it changes
-  headroomctl.py --frames     tail the daemon's frame log
+  headroomctl.py              one line per device
+  headroomctl.py --json       the raw state, pretty-printed
+  headroomctl.py --watch      re-print as things change
+  headroomctl.py --probe      bypass the daemon and ask each device now
 """
 import argparse
 import json
@@ -15,15 +14,12 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from headroom_race import DeviceGone, Race, find_node  # noqa: E402
 
-STALE_AFTER = 6 * 60 * 60          # a level older than this is not worth showing
+STALE_AFTER = 6 * 60 * 60
 
 
 def state_path():
-    base = os.environ.get("XDG_RUNTIME_DIR") or os.path.join(
-        os.path.expanduser("~"), ".cache"
-    )
+    base = os.environ.get("XDG_RUNTIME_DIR") or os.path.join(os.path.expanduser("~"), ".cache")
     return os.path.join(base, "headroom", "state.json")
 
 
@@ -35,91 +31,100 @@ def read_state():
         return None
 
 
-def icon_for(percent):
-    if percent >= 80:
-        return "battery-full"
-    if percent >= 40:
-        return "battery-medium"
-    if percent >= 15:
-        return "battery-low"
-    return "battery-alert"
-
-
-def describe(state):
-    """(text, tooltip, icon, color) for the current state."""
-    if state is None:
-        return "", "Headroom daemon is not running", "battery-alert", "none"
-    if not state.get("dongle"):
-        return "", "PLYR 720 dongle not connected", "battery-alert", "none"
-    percent = state.get("percent")
+def describe(device):
+    percent = device.get("percent")
+    name = device.get("name", device.get("id", "device"))
     if percent is None:
-        linked = state.get("linked")
-        where = "headset off" if linked is False else "headset connected"
-        return "", f"PLYR 720 {where}; battery not reported yet", "headphones", "none"
-    updated = state.get("updated")
+        return f"{name:<20} {'--':>5}   " + ("connected, no level yet"
+                                             if device.get("present") else "not connected")
+    updated = device.get("updated")
     age = 0 if updated is None else max(0.0, time.time() - updated)
+    bits = []
+    if device.get("charging"):
+        bits.append("charging")
+    if not device.get("present"):
+        bits.append("disconnected")
+    if age > 120 and updated:
+        bits.append("at " + time.strftime("%H:%M", time.localtime(updated)))
     if age > STALE_AFTER:
-        return "", f"PLYR 720 last reported {percent}% (stale)", "battery-medium", "none"
-    when = time.strftime("%H:%M", time.localtime(state.get("updated", time.time())))
-    suffix = "" if age < 120 else f", as of {when}"
-    return (f"{percent}%",
-            f"Crusher PLYR 720: {percent}%{suffix}",
-            icon_for(percent),
-            "error" if percent < 15 else "none")
+        bits.append("stale")
+    return f"{name:<20} {str(percent) + '%':>5}   " + ", ".join(bits)
 
 
-def emit(state, as_json):
-    text, tooltip, icon, color = describe(state)
-    if as_json:
-        print(json.dumps({"text": text, "tooltip": tooltip,
-                          "icon": icon, "color": color}), flush=True)
-    else:
-        print(tooltip if not text else f"{text}  ({tooltip})", flush=True)
-    return bool(text)
+def show(state):
+    if state is None:
+        print("headroom daemon is not running", file=sys.stderr)
+        return False
+    devices = state.get("devices", [])
+    if not devices:
+        print("no devices")
+        return False
+    for device in devices:
+        print(describe(device))
+    return any(d.get("percent") is not None for d in devices)
+
+
+def probe():
+    """Ask each source directly, ignoring the daemon and its state file."""
+    import headroom_sources as sources
+    for cls in sources.SOURCES:
+        source = cls()
+        try:
+            present = source.available()
+        except Exception as exc:
+            print(f"{source.id:<20} error: {exc}")
+            continue
+        if not present:
+            print(f"{source.name:<20} not present")
+            continue
+        if isinstance(source, sources.PolledSource):
+            try:
+                reading = source.read()
+            except Exception as exc:
+                print(f"{source.name:<20} error: {exc}")
+                continue
+            print(f"{source.name:<20} "
+                  + (f"{reading.percent}%" if reading.percent is not None else "no answer"))
+        elif hasattr(source, "_read_now"):        # pushed, but can be asked
+            reading = source._read_now()
+            print(f"{source.name:<20} "
+                  + (f"{reading.percent}%" if reading else "no answer (asleep?)"))
+        else:
+            print(f"{source.name:<20} present; reports only when it chooses")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--json", action="store_true", help="emit one JSON object")
-    parser.add_argument("--watch", action="store_true", help="re-emit as the state changes")
-    parser.add_argument("--identify", action="store_true",
-                        help="query firmware identity from the dongle")
-    parser.add_argument("--frames", action="store_true", help="tail the frame log")
+    parser.add_argument("--json", action="store_true", help="print the raw state")
+    parser.add_argument("--watch", action="store_true", help="re-print as things change")
+    parser.add_argument("--probe", action="store_true", help="ask each device directly")
     args = parser.parse_args()
 
-    if args.identify:
-        node = find_node()
-        if not node:
-            sys.exit("dongle not found")
-        try:
-            with Race(node) as race:
-                race.drain(0.6)
-                for key, value in race.identify().items():
-                    print(f"{key:<7} {value}")
-        except PermissionError:
-            sys.exit(f"no access to {node}; install udev/70-skullcandy-plyr.rules")
-        except DeviceGone:
-            sys.exit("dongle went away mid-query")
+    if args.probe:
+        probe()
         return 0
 
-    if args.frames:
-        log = os.path.join(os.path.dirname(state_path()), "frames.log")
-        if not os.path.exists(log):
-            sys.exit("no frame log yet; is headroomd running?")
-        os.execvp("tail", ["tail", "-n", "40", "-f", log])
+    if args.json:
+        state = read_state()
+        print(json.dumps(state or {}, indent=2))
+        return 0 if state else 1
 
     if args.watch:
         last = None
-        while True:
-            state = read_state()
-            key = None if state is None else (state.get("percent"), state.get("dongle"))
-            if key != last:
-                emit(state, args.json)
-                last = key
-            time.sleep(2)
+        try:
+            while True:
+                state = read_state()
+                key = json.dumps(state.get("devices") if state else None, sort_keys=True)
+                if key != last:
+                    print(time.strftime("[%H:%M:%S]"))
+                    show(state)
+                    last = key
+                time.sleep(2)
+        except KeyboardInterrupt:
+            return 130
 
-    return 0 if emit(read_state(), args.json) else 1
+    return 0 if show(read_state()) else 1
 
 
 if __name__ == "__main__":

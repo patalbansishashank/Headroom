@@ -3,7 +3,7 @@
 #
 #   Source of truth : this folder (edit + version-control here)
 #   Plugin runtime  : ~/.config/noctalia/plugins/headroom/   (Noctalia loads from here)
-#   Device access   : /etc/udev/rules.d/70-skullcandy-plyr.rules
+#   Device access   : /etc/udev/rules.d/70-headroom-devices.rules
 #
 # We COPY into the plugin dir by default rather than symlink: this source folder
 # may live on a removable mount, and Noctalia starts the daemon from the plugin
@@ -16,15 +16,15 @@ set -euo pipefail
 
 SRC="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/noctalia/plugins/headroom"
-RULE_SRC="$SRC/udev/70-skullcandy-plyr.rules"
-RULE_DST="/etc/udev/rules.d/70-skullcandy-plyr.rules"
+RULE_SRC="$SRC/udev/70-headroom-devices.rules"
+RULE_DST="/etc/udev/rules.d/70-headroom-devices.rules"
 LINK=0
 [[ "${1:-}" == "--link" ]] && LINK=1
 
 echo "── Headroom install ──────────────────────────────"
 
 # 1) never ship a daemon that cannot start
-for f in bin/headroom_race.py bin/headroomd.py bin/headroomctl.py; do
+for f in bin/*.py; do
   if ! python3 -c "import ast; ast.parse(open('$SRC/$f').read())"; then
     echo "✗ syntax error in $f — aborting, nothing installed"; exit 1
   fi
@@ -39,13 +39,22 @@ echo "✓ python syntax OK"
 #    silently — the device ends up tagged but with no ACL.
 if cmp -s "$RULE_SRC" "$RULE_DST" 2>/dev/null; then
   echo "✓ udev rule already current"
-else
+elif sudo -n true 2>/dev/null || [[ -t 0 ]]; then
   echo "  installing udev rule (needs root):"
-  sudo install -m 644 "$RULE_SRC" "$RULE_DST"
-  sudo rm -f /etc/udev/rules.d/99-skullcandy-plyr.rules   # retire the broken prefix
-  sudo udevadm control --reload
-  sudo udevadm trigger --action=add --subsystem-match=hidraw
-  echo "✓ udev rule installed"
+  if sudo install -m 644 "$RULE_SRC" "$RULE_DST" \
+     && sudo rm -f /etc/udev/rules.d/99-skullcandy-plyr.rules \
+                   /etc/udev/rules.d/70-skullcandy-plyr.rules \
+     && sudo udevadm control --reload \
+     && sudo udevadm trigger --action=add --subsystem-match=hidraw; then
+    echo "✓ udev rule installed"
+  else
+    echo "⚠ could not install the udev rule; devices may be unreadable"
+  fi
+else
+  # Non-interactive and no cached sudo: say so rather than aborting, since
+  # the plugin itself installs fine and access may already be granted.
+  echo "⚠ skipping the udev rule (no terminal for sudo)."
+  echo "  Re-run this script from a terminal if a device reads as unavailable."
 fi
 
 # 3) verify we can actually reach the device before claiming success
@@ -72,9 +81,13 @@ if [[ "$LINK" == 1 ]]; then
   echo "✓ linked  $PLUGIN_DIR -> $SRC   (dev mode)"
 else
   mkdir -p "$PLUGIN_DIR"
-  for item in manifest.json Main.qml BarWidget.qml Settings.qml bin README.md; do
+  for item in manifest.json Main.qml BarWidget.qml Settings.qml README.md; do
     [[ -e "$SRC/$item" ]] && cp -r "$SRC/$item" "$PLUGIN_DIR/"
   done
+  # bin/ without the build cruft, so __pycache__ from a dev run is not shipped
+  mkdir -p "$PLUGIN_DIR/bin"
+  cp "$SRC"/bin/*.py "$PLUGIN_DIR/bin/"
+  rm -rf "$PLUGIN_DIR/bin/__pycache__"
   echo "✓ copied plugin -> $PLUGIN_DIR"
 fi
 

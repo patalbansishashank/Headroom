@@ -6,3 +6,7 @@
 # when it is evaluated. A 99- prefix sets the tag too late and silently
 # grants nothing.
 KERNEL=="hidraw*", ATTRS{idVendor}=="34f0", ATTRS{idProduct}=="5310", MODE="0660", TAG+="uaccess"
+
+# WLmouse receivers (Sword X and siblings). Their config interface is the
+# vendor-page one; the mouse and keyboard interfaces are not enough.
+KERNEL=="hidraw*", ATTRS{idVendor}=="36a7", MODE="0660", TAG+="uaccess"

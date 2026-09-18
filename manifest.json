@@ -6,7 +6,7 @@
   "author": "Shashank Patalbansi",
   "license": "MIT",
   "repository": "https://github.com/patalbansishashank/Headroom",
-  "description": "Battery level for the Skullcandy Crusher PLYR 720 over its 2.4 GHz dongle, so the headset's Bluetooth stays free for your phone.",
+  "description": "Battery levels for wireless peripherals as ring gauges in the bar: Skullcandy Crusher PLYR 720 over its 2.4 GHz dongle, and WLmouse receivers.",
   "entryPoints": {
     "main": "Main.qml",
     "barWidget": "BarWidget.qml",
@@ -14,9 +14,9 @@
   },
   "metadata": {
     "defaultSettings": {
-      "displayMode": "alwaysShow",
       "warnBelow": 15,
-      "hideWhenUnavailable": false
+      "hideWhenUnavailable": false,
+      "hideAbsentDevices": true
     }
   }
 }

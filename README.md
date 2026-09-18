@@ -1,10 +1,40 @@
 # Headroom
 
-Battery level for the **Skullcandy Crusher PLYR 720** in the [Noctalia](https://github.com/noctalia-dev/noctalia-shell) bar, read over the headset's 2.4 GHz USB dongle.
+Battery levels for wireless peripherals, as ring gauges in the [Noctalia](https://github.com/noctalia-dev/noctalia-shell) bar.
 
-Pairing the headset to the PC over Bluetooth would also surface a battery level, through BlueZ and UPower, with no custom code at all. That is not what this is for. The PLYR 720 has exactly one Bluetooth slot, and the point here is to spend it on a phone while the PC talks to the dongle.
+One ring per device. The arc is the charge, the glyph says which device, and the colour says whether you need to care.
 
-Skullcandy ships no Linux software, and the headset is not supported by [HeadsetControl](https://github.com/Sapd/HeadsetControl).
+| Device | How it is read | Refreshes |
+| --- | --- | --- |
+| Skullcandy Crusher PLYR 720 | Airoha RACE over its 2.4 GHz dongle | when the headset links |
+| WLmouse Sword X (and siblings) | COMPX page/command over the receiver | while the mouse is in use |
+
+Neither is supported by any existing Linux tool. The headset is unknown to [HeadsetControl](https://github.com/Sapd/HeadsetControl) and Skullcandy ships nothing for Linux; the mouse's own configurator is a Windows application and a WebHID page.
+
+## Colour
+
+White while there is nothing to think about, easing into amber as the charge runs down and into red when it is urgent. The bands are transitions, not steps:
+
+```
+100 ────────── 30   white
+ 30 ────────── 20   white fading to amber
+ 20 ────────── 10   amber
+ 10 ──────────  5   amber fading to red
+  5 ──────────  0   red
+```
+
+"White" is the theme's foreground rather than literal white, so the gauge stays legible if the bar is ever light-on-dark.
+
+## Adding a device
+
+Write one class in `bin/headroom_sources.py` and add it to `SOURCES`. Nothing else changes: the daemon publishes whatever sources report and the bar renders one gauge per entry.
+
+There are two shapes, because hardware differs in kind:
+
+- **`PolledSource`** answers on demand. The daemon asks on a timer.
+- **`PushedSource`** owns its own connection and speaks when it chooses.
+
+Both devices here are pushed, for different reasons. The headset dongle reports only at link-up and refuses to be asked. The mouse *can* be asked, but sleeps aggressively and simply does not answer while asleep, so polling it on a timer mostly burns retries against a device that is not listening. Instead its source waits on the mouse's own input node, which costs nothing until the mouse moves, and reads the battery when the mouse is demonstrably awake, at most once every two minutes.
 
 ## Status
 
@@ -48,7 +78,7 @@ Beware the first value specifically: because both ends of a descending run move 
 
 The level is pushed only when the headset links, never on request: a direct query for `0x0CD6` is refused, because over USB that asks the **dongle** for its own battery and the dongle has no battery. Charger events produce no frames at all. So the number is correct as of the last link, and the widget timestamps it rather than implying it is live. To refresh it, power the headset off and on.
 
-## The protocol
+## The headset protocol
 
 The dongle is an **Airoha AB157x** running `IoT_SDK_for_BT_Audio_V5.2.0`. Its vendor HID interface carries **RACE**, Airoha's factory command protocol, reverse-engineered and published by ERNW in 2025. Skullcandy did not invent a protocol; Skull-HQ is a RACE client.
 
@@ -160,3 +190,25 @@ The daemon writes `$XDG_RUNTIME_DIR/headroom/state.json` and reconnects on its o
 ## License
 
 MIT
+
+## The mouse protocol
+
+WLmouse receivers speak COMPX, the same page/command framing Lamzu receivers use. It rides a 64-byte **feature** report at report id 0, on the vendor-page interface (usage page `0xFFFF`) — not the mouse or keyboard interfaces of the same receiver.
+
+```
+request  [status=0x00][0][target][length][page][command][args...]   64 bytes
+reply    same shape; status 0xA1 ok, 0xA0 pending, 0xA2 unsupported
+payload  from byte 6, length from byte 3
+```
+
+Battery is `target=0x02 (mouse)`, `page=0x00 (device)`, `command=0x83`, and the payload is `[charging, percent]`.
+
+Three things that cost time here:
+
+- **A reply may arrive shifted by one byte**, so both offsets have to be checked.
+- **`0xA0` means pending, not failure.** The receiver has accepted the request and is waiting on the mouse over RF. Read that as an error and a working device looks broken.
+- **An asleep mouse never answers.** Everything addressed to `target=0x02` stays pending forever while the dongle itself answers instantly. That difference is the diagnostic: if `target=0x00` (dongle firmware) replies and `target=0x02` does not, the protocol is fine and the mouse is simply asleep.
+
+Several interfaces of one receiver mention the vendor usage page, so matching on the page alone finds the same physical mouse more than once. The config interface is the one declaring a 64-item feature report.
+
+Protocol reference: the [OpenMouse project](https://github.com/OpenMouse-Project/mouse-protocol)'s WLmouse driver.

@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
 """
-Headroom daemon: keep a live RACE session to the Skullcandy dongle and publish
-the headset's battery level as a small JSON state file.
+Headroom daemon: collect battery levels from every known source and publish
+them as one small JSON state file.
 
-Why a daemon rather than a one-shot reader. The dongle refuses an on-demand
-battery request over USB: opcode 0x0CD6 is answered with a status-only ack
-carrying 0x02, for every argument tried. The level instead arrives unsolicited,
-as a 0x5D indication, and appears to be pushed around the moment the headset
-links. Nothing polls it into existence, so the only way to catch it is to hold
-the channel open and be listening when it comes.
+Sources are declared in headroom_sources.py; this file does not know what a
+headset or a mouse is. Two shapes are supported, because the hardware differs
+in kind: polled sources are asked on a timer, pushed sources hold a connection
+open and speak when they choose. Each runs on its own thread so a slow or
+sleeping device cannot stall the others.
 
-The dongle also re-enumerates when the headset is powered off, so the hidraw
-node disappears and comes back under a new device number. The daemon treats
-that as normal and reconnects.
+Design notes that matter for cost, since this runs all day:
 
-Every frame that is not firmware log spam is written to a frame log. The battery
-delivery model is not fully pinned down yet, and that log is what will settle it.
+  - the state file is written only when a value actually changes; readers
+    derive age from the stored timestamp, so a still-correct file is never
+    rewritten
+  - polled sources are read every couple of minutes, not continuously; a
+    battery does not move faster than that
+  - the process asks the kernel to kill it when its parent dies, so restarting
+    the shell cannot leave an orphan holding a device
 """
 import argparse
 import ctypes
@@ -24,68 +26,48 @@ import json
 import os
 import signal
 import sys
+import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from headroom_race import (  # noqa: E402
-    BATTERY_BURST_GAP, DeviceGone, OP_BATTERY, Race, T_IND, find_node,
-)
+from headroom_sources import PolledSource, PushedSource, Reading, SOURCES  # noqa: E402
 
-# The dongle announces the headset link on this opcode. Byte 2 is the link flag
-# and bytes 4..9 are the headset's Bluetooth address, little-endian:
-#   00 02 00 01 <addr> ff 00   headset gone
-#   00 02 01 01 <addr> 80 01   headset linked
-OP_LINK_STATE = 0x2CB1
-
-STOP = False
-FRAME_LOG_MAX_BYTES = 512 * 1024
-
+STOP = threading.Event()
 EXIT_OK = 0
-EXIT_ALREADY_RUNNING = 3      # distinct so the supervisor can back off, not hammer
-
-# Read pacing. The dongle answers only GET_REPORT, so this has to poll; the
-# question is how often. It buffers frames, so nothing is lost by asking
-# slowly, and a burst is drained at full speed once the first frame shows up.
-# Idle cost drops ~50x versus polling flat out.
-IDLE_DELAY = 1.0
-BUSY_DELAY = 0.005
-
+EXIT_ALREADY_RUNNING = 3
 PR_SET_PDEATHSIG = 1
 
 
 def _stop(_signum, _frame):
-    global STOP
-    STOP = True
+    STOP.set()
 
 
 def die_with_parent():
-    """Ask the kernel to kill us when whoever started us goes away.
+    """Be killed when whoever started us goes away.
 
-    Noctalia starts this daemon as a child process, but a child survives its
-    parent by default. Restarting the shell therefore leaves an orphan holding
-    the device lock, and the new shell's daemon can never acquire it. Without
-    this, every shell restart needs a manual cleanup.
+    Noctalia runs this as a child. A child outlives its parent by default, so
+    without this a shell restart leaves an orphan holding the device locks and
+    the new daemon can never start.
     """
     try:
         libc = ctypes.CDLL("libc.so.6", use_errno=True)
         libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0)
     except (OSError, AttributeError):
-        return                       # not Linux, or no prctl: nothing to do
-    # The parent may already be gone, in which case the signal above never
-    # arrives and we would linger exactly as intended to prevent.
+        return
     if os.getppid() == 1:
         sys.exit(EXIT_OK)
 
 
-def acquire_lock(directory):
-    """Single-instance guard.
+def state_dir():
+    base = os.environ.get("XDG_RUNTIME_DIR") or os.path.join(os.path.expanduser("~"), ".cache")
+    path = os.path.join(base, "headroom")
+    os.makedirs(path, exist_ok=True)
+    return path
 
-    Two daemons would fight over both the device and the state file, and the
-    loser would publish a "dongle gone" that is merely its own shutdown. Returns
-    the held descriptor, which must stay open for the life of the process.
-    """
-    path = os.path.join(directory, "daemon.lock")
-    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+
+def acquire_lock(directory):
+    """Single-instance guard; the descriptor must stay open for our lifetime."""
+    fd = os.open(os.path.join(directory, "daemon.lock"), os.O_CREAT | os.O_RDWR, 0o644)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
@@ -96,91 +78,78 @@ def acquire_lock(directory):
     return fd
 
 
-def state_dir():
-    base = os.environ.get("XDG_RUNTIME_DIR") or os.path.join(
-        os.path.expanduser("~"), ".cache"
-    )
-    path = os.path.join(base, "headroom")
-    os.makedirs(path, exist_ok=True)
-    return path
-
-
 class Publisher:
-    """Owns the state file. Writes are atomic so a reader never sees a tear."""
+    """Owns the state file. Writes are atomic and only happen on change."""
 
-    def __init__(self, directory):
+    def __init__(self, directory, emit_lines=False):
         self.path = os.path.join(directory, "state.json")
-        self.frame_log = os.path.join(directory, "frames.log")
-        self.percent = None
-        self.percent_at = None
-        self._restore()
-        self.dongle = False
-        self.linked = None
-        self.headset_addr = None
-        self.identity = {}
-        self.emit = False            # also print a JSON line on every change
-        self._last_emitted = None
+        self.emit_lines = emit_lines
+        self._lock = threading.Lock()
+        self._readings = {}          # source id -> Reading
+        self._meta = {}              # source id -> static description
         self._last_written = None
-        self.last_battery_frame = 0.0
-        self.burst = []              # values of the run currently arriving
+        self._restore()
+
+    def describe(self, source):
+        self._meta[source.id] = {
+            "id": source.id,
+            "name": source.name,
+            "icon": source.icon,
+            "note": source.staleness_note,
+        }
 
     def _restore(self):
-        """Carry the last known level across a restart.
+        """Carry levels across a restart.
 
-        The dongle only volunteers the battery around the moment the headset
-        links. Starting blank would mean showing nothing until the next power
-        cycle, which could be hours. The level is reloaded with its original
-        timestamp, so it is presented as old rather than as fresh.
+        A pushed source may not speak again for hours, so starting blank would
+        leave the bar empty for no good reason. Timestamps are kept as they
+        were, so an old value still presents as old.
         """
         try:
             with open(self.path) as fh:
                 previous = json.load(fh)
         except (OSError, ValueError):
             return
-        level = previous.get("percent")
-        when = previous.get("updated")
-        if isinstance(level, int) and 0 < level <= 100 and isinstance(when, (int, float)):
-            self.percent = level
-            self.percent_at = when
+        for entry in previous.get("devices", []):
+            percent, when = entry.get("percent"), entry.get("updated")
+            if isinstance(percent, int) and 0 < percent <= 100 and isinstance(when, (int, float)):
+                self._readings[entry.get("id")] = Reading(
+                    percent=percent, charging=bool(entry.get("charging")),
+                    present=False, at=when)
 
-    def note_frame(self, frame):
-        """Append to the frame log, trimming it when it gets large."""
-        try:
-            if (os.path.exists(self.frame_log)
-                    and os.path.getsize(self.frame_log) > FRAME_LOG_MAX_BYTES):
-                with open(self.frame_log) as fh:
-                    tail = fh.readlines()[-2000:]
-                with open(self.frame_log, "w") as fh:
-                    fh.writelines(tail)
-            stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-            with open(self.frame_log, "a") as fh:
-                fh.write(f"{stamp} {frame}\n")
-        except OSError:
-            pass
+    def update(self, source_id, reading):
+        with self._lock:
+            previous = self._readings.get(source_id)
+            # A source that cannot reach its device reports presence without a
+            # level. Keep the last known number rather than blanking it.
+            if reading.percent is None and previous is not None:
+                reading.percent = previous.percent
+                reading.charging = previous.charging
+                reading.at = previous.at
+            self._readings[source_id] = reading
+            self._publish_locked()
 
-    def publish(self, force=False):
-        """Write the state file, but only when something actually changed.
+    def _snapshot(self):
+        devices = []
+        for source_id, meta in self._meta.items():
+            reading = self._readings.get(source_id)
+            devices.append({
+                **meta,
+                "percent": reading.percent if reading else None,
+                "charging": bool(reading.charging) if reading else False,
+                "present": bool(reading.present) if reading else False,
+                "updated": reading.at if reading and reading.percent is not None else None,
+            })
+        return devices
 
-        Called unconditionally this would rewrite the file twice a second
-        forever with identical content. Consumers derive age from `updated`,
-        so a still-current file does not need rewriting just because time
-        passed.
-        """
-        signature = (self.percent, self.percent_at, self.dongle,
-                     self.linked, self.headset_addr)
-        if not force and signature == self._last_written:
+    def _publish_locked(self):
+        devices = self._snapshot()
+        signature = json.dumps(devices, sort_keys=True)
+        if signature == self._last_written:
             return
         self._last_written = signature
 
-        payload = {
-            "percent": self.percent,
-            "updated": self.percent_at,
-            "dongle": self.dongle,
-            "linked": self.linked,
-            "headset": self.headset_addr,
-            "identity": self.identity,
-            "published": time.time(),
-        }
+        payload = {"devices": devices, "published": time.time()}
         tmp = self.path + ".tmp"
         try:
             with open(tmp, "w") as fh:
@@ -188,133 +157,47 @@ class Publisher:
             os.replace(tmp, self.path)
         except OSError:
             pass
+        if self.emit_lines:
+            print(json.dumps({"devices": devices}), flush=True)
 
-        if self.emit:
-            # Noctalia reads this on the daemon's stdout. Only changes are
-            # printed, so an idle headset does not spam the shell.
-            signature = (self.percent, self.dongle, self.linked)
-            if signature != self._last_emitted:
-                self._last_emitted = signature
-                print(json.dumps({"percent": self.percent,
-                                  "dongle": self.dongle,
-                                  "linked": self.linked,
-                                  "updated": self.percent_at}), flush=True)
+    def publish(self):
+        with self._lock:
+            self._publish_locked()
 
 
-def handle_frame(pub, frame, verbose):
-    """Called for every frame the dongle sends, from whichever read path."""
-    pub.note_frame(frame)
-    if verbose:
-        print(f"  {frame}", flush=True)
-
-    if frame.opcode == OP_BATTERY and frame.type == T_IND and frame.payload:
-        # Collect the run; the level is whatever it settles on. Committing
-        # each value as it arrives would flicker the bar through the whole
-        # animation before landing on the right number.
-        if time.time() - pub.last_battery_frame > BATTERY_BURST_GAP:
-            pub.burst = []
-        pub.burst.append(frame.payload[0])
-        pub.last_battery_frame = time.time()
-
-    elif frame.opcode == OP_LINK_STATE and len(frame.payload) >= 10:
-        pub.linked = bool(frame.payload[2])
-        addr = frame.payload[4:10][::-1]
-        pub.headset_addr = ":".join(f"{b:02x}" for b in addr)
-        if verbose:
-            print(f"headroomd: headset {'linked' if pub.linked else 'gone'} "
-                  f"({pub.headset_addr})", flush=True)
-        pub.publish()
-
-
-def commit_burst(pub, verbose):
-    """Publish the level once the run has stopped arriving."""
-    if not pub.burst:
-        return
-    if time.time() - pub.last_battery_frame <= BATTERY_BURST_GAP:
-        return
-    run, pub.burst = pub.burst, []
-    level = run[-1]
-    if 0 < level <= 100:
-        pub.percent = level
-        pub.percent_at = pub.last_battery_frame
-        if verbose:
-            print(f"headroomd: battery {level}%  (burst {run})", flush=True)
-        pub.publish()
-    elif verbose:
-        print(f"headroomd: ignoring out-of-range burst {run}", flush=True)
-
-
-def serve(pub, verbose, poll_interval):
-    """One connected session. Returns when the dongle goes away."""
-    node = find_node()
-    if not node:
-        return False
-
-    try:
-        race = Race(node)
-    except PermissionError:
-        print(f"headroomd: no access to {node}. Install the udev rule "
-              f"(udev/70-skullcandy-plyr.rules) and re-trigger udev.",
-              file=sys.stderr)
-        time.sleep(5)
-        return False
-    except OSError:
-        return False
-
-    pub.dongle = True
-    if verbose:
-        print(f"headroomd: attached to {node}", flush=True)
-
-    race.on_frame = lambda frame: handle_frame(pub, frame, verbose)
-
-    with race:
+def run_polled(source, pub, verbose):
+    """Ask a source on its own schedule until we are told to stop."""
+    while not STOP.is_set():
         try:
-            # The link-up burst is already queued by the time we attach. Decode
-            # it before anything else; this is where the interesting events are.
-            race.drain(1.5)
-            try:
-                pub.identity = race.identify()
-                if verbose and pub.identity:
-                    print(f"headroomd: {pub.identity}", flush=True)
-            except DeviceGone:
-                raise
-            except OSError:
-                pass
-            pub.publish()
-
-            next_poll = None
-            delay = IDLE_DELAY
-            while not STOP:
-                # Frames reach the publisher through the callback. Speed up the
-                # moment anything arrives so a link-up burst drains promptly,
-                # then ease back off to the idle rate.
-                if race.pump():
-                    delay = BUSY_DELAY
-                else:
-                    delay = min(delay * 2.0, IDLE_DELAY)
-                commit_burst(pub, verbose)
-
-
-                time.sleep(delay)
-        except DeviceGone:
+            reading = source.read()
+        except Exception as exc:                      # never kill the thread
             if verbose:
-                print("headroomd: dongle went away (headset powered off?)", flush=True)
-        except OSError:
-            pass
+                print(f"headroomd: {source.id} read failed: {exc}", flush=True)
+            reading = Reading(present=False)
+        pub.update(source.id, reading)
+        if verbose and reading.percent is not None:
+            print(f"headroomd: {source.id} {reading.percent}%"
+                  f"{' charging' if reading.charging else ''}", flush=True)
+        STOP.wait(source.interval)
 
-    pub.dongle = False
-    pub.linked = None
-    pub.publish()
-    return True
+
+def run_pushed(source, pub, verbose):
+    """Let a source hold its own connection and call back."""
+    def emit(reading):
+        pub.update(source.id, reading)
+        if verbose and reading.percent is not None:
+            print(f"headroomd: {source.id} {reading.percent}%", flush=True)
+    try:
+        source.run(emit, STOP.is_set)
+    except Exception as exc:
+        if verbose:
+            print(f"headroomd: {source.id} stopped: {exc}", flush=True)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("-v", "--verbose", action="store_true",
-                        help="print every frame as it arrives")
-    parser.add_argument("--poll-interval", type=float, default=0.0, metavar="SEC",
-                        help="also send a battery request this often; off by "
-                             "default because the dongle refuses it (see README)")
+                        help="log every reading as it arrives")
     parser.add_argument("--emit", action="store_true",
                         help="print a JSON line on stdout whenever the state changes")
     args = parser.parse_args()
@@ -325,22 +208,41 @@ def main():
 
     directory = state_dir()
     if acquire_lock(directory) is None:
-        print("headroomd: another instance already holds the dongle; exiting",
-              file=sys.stderr)
+        print("headroomd: another instance is already running; exiting", file=sys.stderr)
         return EXIT_ALREADY_RUNNING
 
-    pub = Publisher(directory)
-    pub.emit = args.emit
-    pub.publish(force=True)
-    if args.verbose:
-        print(f"headroomd: state -> {pub.path}", flush=True)
+    pub = Publisher(directory, emit_lines=args.emit)
 
-    while not STOP:
-        if not serve(pub, args.verbose, args.poll_interval):
-            time.sleep(2.0)          # dongle absent or unreadable; wait and retry
-    pub.dongle = False
+    threads = []
+    for cls in SOURCES:
+        source = cls()
+        try:
+            present = source.available()
+        except Exception:
+            present = False
+        pub.describe(source)
+        if not present:
+            if args.verbose:
+                print(f"headroomd: {source.id} not present", flush=True)
+            continue
+        target = run_polled if isinstance(source, PolledSource) else run_pushed
+        thread = threading.Thread(target=target, args=(source, pub, args.verbose),
+                                  name=source.id, daemon=True)
+        thread.start()
+        threads.append(thread)
+        if args.verbose:
+            kind = "polled" if isinstance(source, PolledSource) else "pushed"
+            print(f"headroomd: {source.id} started ({kind})", flush=True)
+
     pub.publish()
-    return 0
+    if not threads:
+        print("headroomd: no sources present", file=sys.stderr)
+
+    while not STOP.is_set():
+        STOP.wait(1.0)
+    for thread in threads:
+        thread.join(timeout=2.0)
+    return EXIT_OK
 
 
 if __name__ == "__main__":

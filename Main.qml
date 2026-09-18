@@ -3,39 +3,46 @@ import Quickshell
 import Quickshell.Io
 import qs.Commons
 
-// Headroom: headset battery for the Skullcandy Crusher PLYR 720.
+// Headroom: battery levels for wireless peripherals.
 //
-// All the protocol work happens in bin/headroomd.py, which holds a RACE session
-// open on the dongle's vendor HID interface. This file only supervises that
-// daemon and republishes what it reports, so the shell never touches hidraw.
+// All device work happens in bin/headroomd.py, which owns the connections and
+// publishes one JSON line whenever anything changes. This file supervises that
+// daemon and republishes its state, so the shell never touches a hidraw node.
 //
-// The daemon prints one JSON line per state change and is otherwise silent, so
-// an idle headset costs nothing.
+// Adding a device is a change to bin/headroom_sources.py alone. Nothing here
+// names a headset or a mouse: the list is whatever the daemon reports.
 Item {
   id: root
 
   property var pluginApi: null
 
-  // ---- state, consumed by BarWidget.qml ----
-  property int percent: -1            // -1 when no level is known
-  property bool donglePresent: false
-  property var linked: null           // true / false / null when unreported
-  property double updatedAt: 0        // epoch ms of the last level
+  // Array of { id, name, icon, note, percent, charging, present, updated }.
+  // `percent` is null when nothing has been reported yet.
+  property var devices: []
 
-  readonly property bool hasReading: percent >= 0
-  readonly property real ageSeconds: updatedAt > 0 ? (Date.now() - updatedAt) / 1000 : -1
+  // Bumped whenever time passes, so age-dependent bindings re-evaluate
+  // without the daemon having to say anything.
+  property int ageTick: 0
+
+  readonly property var known: devices.filter(d => d.percent !== null && d.percent !== undefined)
+  readonly property bool hasAny: known.length > 0
+  readonly property int lowest: {
+    var worst = 101
+    for (var i = 0; i < known.length; i++)
+      worst = Math.min(worst, known[i].percent)
+    return worst === 101 ? -1 : worst
+  }
 
   readonly property string daemonPath: (pluginApi?.pluginDir ?? "") + "/bin/headroomd.py"
   readonly property bool wantRunning: pluginApi !== null && pluginApi.manifest !== null
 
-  // Exit code the daemon uses for "another instance already holds the device".
   readonly property int exitAlreadyRunning: 3
   property int restartBackoff: 3000
 
-  function reset() {
-    percent = -1
-    donglePresent = false
-    linked = null
+  function ageOf(device) {
+    if (!device || !device.updated)
+      return -1
+    return (Date.now() - device.updated * 1000) / 1000
   }
 
   Process {
@@ -50,12 +57,11 @@ Item {
         if (line === "")
           return
         try {
-          var s = JSON.parse(line)
-          root.percent = (s.percent === null || s.percent === undefined) ? -1 : s.percent
-          root.donglePresent = s.dongle === true
-          root.linked = (s.linked === undefined) ? null : s.linked
-          root.updatedAt = s.updated ? s.updated * 1000 : 0
-          root.restartBackoff = 3000        // it started; forget past contention
+          var parsed = JSON.parse(line)
+          if (parsed.devices !== undefined) {
+            root.devices = parsed.devices
+            root.restartBackoff = 3000      // it started; forget past contention
+          }
         } catch (e) {
           Logger.w("Headroom", "unparsable line from daemon:", line)
         }
@@ -71,16 +77,14 @@ Item {
     }
 
     onExited: (code) => {
-      root.reset()
+      root.devices = []
       if (!root.wantRunning)
         return
-
-      // Losing the race for the device lock is not a crash, and retrying every
-      // few seconds forever just fills the log. Back off instead, up to a
-      // minute, and reset once a start actually sticks.
+      // Losing the device lock is not a crash. Back off rather than retrying
+      // every few seconds forever.
       if (code === root.exitAlreadyRunning) {
         root.restartBackoff = Math.min(root.restartBackoff * 2, 60000)
-        Logger.w("Headroom", `device held by another instance; retrying in ${root.restartBackoff / 1000}s`)
+        Logger.w("Headroom", `devices held by another instance; retrying in ${root.restartBackoff / 1000}s`)
       } else {
         Logger.w("Headroom", `daemon exited (${code}); restarting`)
       }
@@ -89,8 +93,6 @@ Item {
     }
   }
 
-  // The daemon is meant to run for the whole session. If it dies anyway, come
-  // back after a pause rather than hammering a broken install.
   Timer {
     id: restartTimer
     interval: root.restartBackoff
@@ -98,12 +100,12 @@ Item {
     onTriggered: if (root.wantRunning && !daemon.running) daemon.running = true
   }
 
-  // Keep `ageSeconds` moving so the widget can dim a level that has gone stale
-  // without the daemon having to say anything.
+  // One tick a minute is enough to fade a reading as it ages; anything faster
+  // would be redrawing for no visible change.
   Timer {
-    interval: 30000
+    interval: 60000
     repeat: true
-    running: root.wantRunning && root.hasReading
-    onTriggered: root.updatedAtChanged()
+    running: root.wantRunning && root.hasAny
+    onTriggered: root.ageTick++
   }
 }
