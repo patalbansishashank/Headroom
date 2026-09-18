@@ -81,7 +81,7 @@ class WLMouseSource(PushedSource):
     id = "wlmouse"
     icon = "mouse"
     interval = 120.0          # minimum seconds between reads while in use
-    staleness_note = "Refreshes while the mouse is in use"
+    staleness_note = "Reports battery on connect and while in use"
 
     def __init__(self):
         self.name = "WLmouse"
@@ -165,7 +165,9 @@ class WLMouseSource(PushedSource):
 
             try:
                 while not should_stop():
-                    ready = poller.poll(5000)
+                    # Two seconds bounds how long a touched mouse takes to
+                    # reappear; one wakeup per two seconds is nothing.
+                    ready = poller.poll(2000)
                     for fd, _ in ready:
                         try:
                             while True:
@@ -248,7 +250,7 @@ class PlyrHeadsetSource(PushedSource):
     id = "plyr720"
     name = "Crusher PLYR 720"
     icon = "headphones"
-    staleness_note = "Refreshes when the headset links"
+    staleness_note = "Reports battery only when it connects; power-cycle it for a fresh number"
 
     def available(self):
         import headroom_race as race

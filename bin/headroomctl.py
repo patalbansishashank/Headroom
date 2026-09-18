@@ -39,13 +39,11 @@ def describe(device):
                                              if device.get("present") else "not connected")
     updated = device.get("updated")
     age = 0 if updated is None else max(0.0, time.time() - updated)
-    bits = []
+    bits = ["connected" if device.get("present") else "not connected"]
     if device.get("charging"):
         bits.append("charging")
-    if not device.get("present"):
-        bits.append("disconnected")
     if age > 120 and updated:
-        bits.append("at " + time.strftime("%H:%M", time.localtime(updated)))
+        bits.append("reading from " + time.strftime("%H:%M", time.localtime(updated)))
     if age > STALE_AFTER:
         bits.append("stale")
     return f"{name:<20} {str(percent) + '%':>5}   " + ", ".join(bits)

@@ -215,29 +215,40 @@ Item {
   function tooltipText() {
     if (root.devices.length === 0)
       return "Headroom\nNo devices"
-    var lines = []
+    var blocks = []
     for (var i = 0; i < root.devices.length; i++) {
       var d = root.devices[i]
       var age = root.main ? root.main.ageOf(d) : -1
-      var line = d.name + ": "
-      if (d.percent === null || d.percent === undefined) {
-        line += d.present ? "not reported yet" : "not connected"
-      } else {
-        line += d.percent + "%"
+      var lines = []
+
+      // Line 1: name and level.
+      var head = d.name
+      if (d.percent !== null && d.percent !== undefined) {
+        head += ": " + d.percent + "%"
         if (d.charging)
-          line += ", charging"
-        if (age > 120) {
-          var when = Qt.formatTime(new Date(d.updated * 1000), "HH:mm")
-          line += "  (at " + when + ")"
-        }
-        if (!d.present)
-          line += "  (disconnected)"
+          head += ", charging"
       }
-      if (d.note && age > 120)
-        line += "\n    " + d.note
-      lines.push(line)
+      lines.push(head)
+
+      // Line 2: connection state, stated outright so it cannot be confused
+      // with when the number was taken.
+      if (d.percent === null || d.percent === undefined)
+        lines.push(d.present ? "Connected, no battery reported yet" : "Not connected")
+      else if (!d.present)
+        lines.push("Not connected")
+      else
+        lines.push("Connected")
+
+      // Line 3: how old the number is, only once it is old enough to matter.
+      if (d.percent !== null && d.percent !== undefined && age > 120) {
+        var when = Qt.formatTime(new Date(d.updated * 1000), "HH:mm")
+        lines.push("Battery reading from " + when)
+        if (d.note)
+          lines.push(d.note)
+      }
+      blocks.push(lines.join("\n"))
     }
-    return lines.join("\n")
+    return blocks.join("\n\n")
   }
 
   MouseArea {

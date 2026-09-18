@@ -79,7 +79,7 @@ Beware the first value specifically: because both ends of a descending run move 
 
 ### What it does not do
 
-The level is pushed only when the headset links, never on request: a direct query for `0x0CD6` is refused, because over USB that asks the **dongle** for its own battery and the dongle has no battery. Charger events produce no frames at all. So the number is correct as of the last link, and the widget timestamps it rather than implying it is live. To refresh it, power the headset off and on.
+The level is pushed only when the headset links, never on request: a direct query for `0x0CD6` is refused, because over USB that asks the **dongle** for its own battery and the dongle has no battery. Charger events produce no frames at all. So the number is correct as of the last link. The tooltip states connection and reading-age as two separate lines, because a single sentence combining them was read as "not connected since 19:26" when the headset was connected the whole time. To refresh the number, power the headset off and on.
 
 ## The headset protocol
 
