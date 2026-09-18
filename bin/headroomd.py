@@ -78,11 +78,17 @@ def acquire_lock(directory):
     return fd
 
 
+EVENT_LOG_MAX_BYTES = 256 * 1024
+
+
 class Publisher:
     """Owns the state file. Writes are atomic and only happen on change."""
 
     def __init__(self, directory, emit_lines=False):
         self.path = os.path.join(directory, "state.json")
+        # Every update is recorded. A level that appears and then vanishes is
+        # very hard to diagnose after the fact without this.
+        self.event_log = os.path.join(directory, "events.log")
         self.emit_lines = emit_lines
         self._lock = threading.Lock()
         self._readings = {}          # source id -> Reading
@@ -117,9 +123,26 @@ class Publisher:
                     percent=percent, charging=bool(entry.get("charging")),
                     present=False, at=when)
 
+    def _log(self, text):
+        try:
+            if (os.path.exists(self.event_log)
+                    and os.path.getsize(self.event_log) > EVENT_LOG_MAX_BYTES):
+                with open(self.event_log) as fh:
+                    tail = fh.readlines()[-1000:]
+                with open(self.event_log, "w") as fh:
+                    fh.writelines(tail)
+            stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            with open(self.event_log, "a") as fh:
+                fh.write(f"{stamp}  {text}\n")
+        except OSError:
+            pass
+
     def update(self, source_id, reading):
         with self._lock:
             previous = self._readings.get(source_id)
+            self._log(f"{source_id:<10} in: percent={reading.percent} "
+                      f"present={reading.present} "
+                      f"prev={previous.percent if previous else 'NONE'}")
             # A source that cannot reach its device reports presence without a
             # level. Keep the last known number rather than blanking it.
             if reading.percent is None and previous is not None:
@@ -127,6 +150,8 @@ class Publisher:
                 reading.charging = previous.charging
                 reading.at = previous.at
             self._readings[source_id] = reading
+            self._log(f"{source_id:<10} out: percent={reading.percent} "
+                      f"present={reading.present}")
             self._publish_locked()
 
     def _snapshot(self):
@@ -212,6 +237,8 @@ def main():
         return EXIT_ALREADY_RUNNING
 
     pub = Publisher(directory, emit_lines=args.emit)
+    pub._log(f"--- daemon start, pid {os.getpid()}, "
+             f"restored={{{', '.join(f'{k}={v.percent}' for k, v in pub._readings.items()) or 'nothing'}}}")
 
     threads = []
     for cls in SOURCES:
@@ -240,6 +267,7 @@ def main():
 
     while not STOP.is_set():
         STOP.wait(1.0)
+    pub._log("--- daemon stopping")
     for thread in threads:
         thread.join(timeout=2.0)
     return EXIT_OK

@@ -77,12 +77,22 @@ Item {
     return colorCritical
   }
 
+  // Below this the colour is doing the talking, so the whole glyph takes it
+  // rather than just a sliver of fill. A red 5% that is five pixels tall is
+  // not a warning anyone will see.
+  function isUrgent(percent) {
+    return percent !== null && percent !== undefined && percent < 30
+  }
+
   // ---- geometry (BarPill's own numbers) ----------------------------------
-  // The glyph IS the gauge, so it gets the full capsule height rather than
-  // being shrunk to sit inside a ring.
-  readonly property real glyphSize: Style.toOdd(capsuleHeight * 0.52)
-  readonly property real gaugeSize: Math.round(capsuleHeight * 0.74)
-  readonly property real gaugeSpacing: Math.round(capsuleHeight * 0.22)
+  // A glyph, and beside it a slim upright bar that is the level. The glyph
+  // carries the colour so a low battery is visible from across the room; the
+  // bar carries the precision.
+  readonly property real glyphSize: Style.toOdd(capsuleHeight * 0.50)
+  readonly property real gaugeHeight: Math.round(capsuleHeight * 0.62)
+  readonly property real barWidth: Math.max(3, Math.round(capsuleHeight * 0.13))
+  readonly property real barGap: Math.max(2, Math.round(capsuleHeight * 0.10))
+  readonly property real gaugeSpacing: Math.round(capsuleHeight * 0.26)
 
   readonly property real contentWidth: isVertical
     ? capsuleHeight
@@ -115,11 +125,7 @@ Item {
     Repeater {
       model: root.shown
 
-      // The charge fills the device's own glyph from the bottom, like a
-      // vessel: the unfilled part stays as a faint outline of the same shape,
-      // so the icon still reads as a headset or a mouse at a glance. Two
-      // copies of the glyph, identical geometry, the upper one clipped.
-      delegate: Item {
+      delegate: RowLayout {
         id: gauge
         required property var modelData
 
@@ -136,67 +142,71 @@ Item {
           return (age >= 0 && age > 3600) ? 0.55 : 1.0
         }
 
-        implicitWidth: root.gaugeSize
-        implicitHeight: root.gaugeSize
+        spacing: root.barGap
         opacity: freshness
 
         Behavior on opacity {
           NumberAnimation { duration: Style.animationNormal }
         }
 
-        // The empty part: the whole glyph, faint.
+        // The device. Fully tinted, so the warning colour occupies real area
+        // instead of a few pixels at the bottom of a fill.
         NIcon {
-          id: emptyGlyph
-          anchors.fill: parent
-          horizontalAlignment: Text.AlignHCenter
-          verticalAlignment: Text.AlignVCenter
+          Layout.alignment: Qt.AlignVCenter
           icon: gauge.glyph
           pointSize: root.glyphSize
           applyUiScale: false
-          color: Qt.rgba(Color.mOnSurfaceVariant.r, Color.mOnSurfaceVariant.g,
-                         Color.mOnSurfaceVariant.b, gauge.hasLevel ? 0.32 : 0.55)
+          color: gauge.hasLevel
+            ? gauge.tint
+            : Qt.rgba(Color.mOnSurfaceVariant.r, Color.mOnSurfaceVariant.g,
+                      Color.mOnSurfaceVariant.b, 0.55)
+
+          Behavior on color {
+            ColorAnimation { duration: Style.animationNormal }
+          }
         }
 
-        // The charged part: the same glyph, clipped to the bottom fraction.
-        // Both copies share the gauge's bottom edge, so they line up exactly.
+        // The level. A small upright cell that empties downwards.
         Item {
-          anchors.left: parent.left
-          anchors.right: parent.right
-          anchors.bottom: parent.bottom
-          height: parent.height * gauge.fraction
-          clip: true
+          Layout.alignment: Qt.AlignVCenter
+          implicitWidth: root.barWidth
+          implicitHeight: root.gaugeHeight
           visible: gauge.hasLevel
 
-          Behavior on height {
-            NumberAnimation { duration: Style.animationNormal; easing.type: Easing.OutCubic }
+          Rectangle {                       // track
+            anchors.fill: parent
+            radius: width / 2
+            color: Qt.rgba(Color.mOnSurfaceVariant.r, Color.mOnSurfaceVariant.g,
+                           Color.mOnSurfaceVariant.b, 0.28)
           }
 
-          NIcon {
-            width: gauge.width
-            height: gauge.height
+          Rectangle {                       // charge
+            anchors.left: parent.left
+            anchors.right: parent.right
             anchors.bottom: parent.bottom
-            horizontalAlignment: Text.AlignHCenter
-            verticalAlignment: Text.AlignVCenter
-            icon: gauge.glyph
-            pointSize: root.glyphSize
-            applyUiScale: false
+            // Never let a non-zero charge round away to nothing.
+            height: Math.max(width, parent.height * gauge.fraction)
+            radius: width / 2
             color: gauge.tint
 
+            Behavior on height {
+              NumberAnimation { duration: Style.animationNormal; easing.type: Easing.OutCubic }
+            }
             Behavior on color {
               ColorAnimation { duration: Style.animationNormal }
             }
           }
-        }
 
-        // Charging: a hairline under the glyph, static so it costs nothing.
-        Rectangle {
-          visible: modelData.charging
-          anchors.horizontalCenter: parent.horizontalCenter
-          anchors.bottom: parent.bottom
-          width: Math.round(parent.width * 0.62)
-          height: Math.max(1, Math.round(parent.height * 0.08))
-          radius: height / 2
-          color: gauge.tint
+          // Charging pip, static so it costs nothing to show.
+          Rectangle {
+            visible: modelData.charging
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.top: parent.top
+            width: parent.width
+            height: width
+            radius: width / 2
+            color: root.colorFull
+          }
         }
       }
     }

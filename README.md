@@ -2,7 +2,9 @@
 
 Battery levels for wireless peripherals, as ring gauges in the [Noctalia](https://github.com/noctalia-dev/noctalia-shell) bar.
 
-One gauge per device, and the gauge is the device's own icon. The charge fills the glyph from the bottom like a vessel; the unfilled part stays as a faint outline of the same shape, so a headset still reads as a headset. The colour says whether you need to care.
+One gauge per device: the device's own icon, fully tinted by how much charge is left, with a slim upright bar beside it carrying the exact level.
+
+The icon takes the colour rather than a fill, because colour only works if it occupies real area. A red sliver five pixels tall at the bottom of a filled glyph is not a warning anyone will notice; a whole red headset is.
 
 | Device | How it is read | Refreshes |
 | --- | --- | --- |
