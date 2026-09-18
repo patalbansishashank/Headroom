@@ -6,9 +6,15 @@ The Crusher PLYR 720 dongle is an Airoha AB157x. Its vendor HID interface
 (usage page 0xFF13) carries Airoha's RACE protocol, the same one documented by
 the 2025 Airoha headphone research. Framing:
 
-  report 0x06 OUT, 61 data bytes -> b"\x06" + u16le(n) + race_bytes, NUL padded
-  report 0x07 IN,  61 data bytes <- GET_REPORT(7): [0]=0x07, [1:3]=u16le n,
-                                    [3:3+n] = the next slice of a byte stream
+  report 0x06 OUT -> [0x06][length][recipient][race bytes...], NUL padded
+  report 0x07 IN  <- GET_REPORT(7): [0x07][length][recipient][race bytes...]
+
+The third byte is the RECIPIENT, not the high half of a 16-bit length as the
+public RACE toolkit assumes. 0x00 addresses the dongle itself; 0x80 addresses
+the headset behind it. Since the byte is zero for dongle-local traffic, a
+16-bit read happens to give the right length there, which is why the mistake
+survives so easily — and why every battery query aimed at the dongle came
+back "no battery": the dongle hasn't got one.
 
   race frame = 0x05 | type | u16le length | u16le opcode | payload
                length counts the 2-byte opcode plus the payload
@@ -31,6 +37,14 @@ RPT_OUT, RPT_IN, RPT_SIZE = 0x06, 0x07, 62
 
 HEAD = 0x05
 T_REQ, T_RESP, T_REQ_NR, T_IND = 0x5A, 0x5B, 0x5C, 0x5D
+
+# Recipient byte: who the packet is for.
+RECIPIENT_DONGLE = 0x00
+RECIPIENT_HEADSET = 0x80          # AirohaBaseDevice.h: remote_byte defaults to 0x80
+
+# RACE_BLUETOOTH_TWS_GET_BATTERY. Takes a role byte (0 = agent, 1 = partner)
+# and answers with a 0x5D indication of [status, role, percent].
+ROLE_AGENT = 0x00
 TYPE_NAMES = {T_REQ: "CMD", T_RESP: "RESP", T_REQ_NR: "CMD_NR", T_IND: "IND"}
 
 # Opcodes. The first three are documented by the Airoha research; the battery
@@ -119,6 +133,7 @@ class Race:
         self.node = node
         self.fd = os.open(node, os.O_RDWR | os.O_NONBLOCK)
         self._buf = bytearray()
+        self.last_recipient = RECIPIENT_DONGLE
         # Called for every decoded frame, on every code path. The backlog that
         # builds up while nobody is listening carries real events, so no path
         # may throw frames away before this has seen them.
@@ -148,7 +163,8 @@ class Race:
             return False
         if report[0] != RPT_IN:
             return False
-        count = struct.unpack("<H", bytes(report[1:3]))[0]
+        count = report[1]                     # length is ONE byte
+        self.last_recipient = report[2]        # ...and byte 2 is the recipient
         if not 0 < count <= RPT_SIZE - 3:
             return False
         self._buf += report[3:3 + count]
@@ -227,15 +243,36 @@ class Race:
         self._buf.clear()
         return frames
 
-    def send(self, opcode, payload=b"", type_=T_REQ):
+    def send(self, opcode, payload=b"", type_=T_REQ, recipient=RECIPIENT_DONGLE):
         frame = struct.pack("<BBHH", HEAD, type_, len(payload) + 2, opcode) + payload
-        report = bytes([RPT_OUT]) + struct.pack("<H", len(frame)) + frame
+        report = bytes([RPT_OUT, len(frame), recipient]) + frame
         try:
             os.write(self.fd, report.ljust(RPT_SIZE, b"\x00"))
         except OSError as exc:
             if exc.errno in (errno.ENODEV, errno.ENXIO, errno.ESHUTDOWN, errno.EIO):
                 raise DeviceGone(str(exc)) from exc
             raise
+
+    def read_battery(self, timeout=2.0):
+        """Ask the headset for its battery. Returns a percent, or None.
+
+        This is a real on-demand query, not a wait for the device to
+        volunteer one: address the headset (not the dongle) and pass the
+        role byte the command requires.
+        """
+        self.drain(0.3)
+        self.send(OP_BATTERY, bytes([ROLE_AGENT]), recipient=RECIPIENT_HEADSET)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            for frame in self.poll(0.05):
+                if frame.opcode != OP_BATTERY or frame.type != T_IND:
+                    continue
+                # [status, role, percent]
+                if len(frame.payload) >= 3 and frame.payload[0] == 0:
+                    level = frame.payload[2]
+                    if 0 <= level <= 100:
+                        return level
+        return None
 
     def request(self, opcode, payload=b"", timeout=1.5, want=None):
         """Send one request and collect the frames that echo its opcode."""

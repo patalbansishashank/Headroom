@@ -41,45 +41,14 @@ Both devices here are pushed, for different reasons. The headset dongle reports 
 
 ## Status
 
-Working. The battery level is real, and it is the **first** value of each burst.
+Working, and both devices report on demand.
 
 | Capability | State |
 | --- | --- |
-| Talk to the dongle over its vendor protocol | Working |
-| Read firmware identity and Bluetooth address | Working |
-| Detect the headset linking and unlinking | Working |
-| Read battery level | Working, refreshes when the headset links |
-
-### The trap, and it caught this project three times
-
-On link-up the dongle sends a descending run of indications on `0x0CD6`:
-
-```
-99 98 97
-99 98 97 97 96
-60 59 58 57 ... 27 26
-```
-
-**The level is the value it settles on, not the one it starts from.** The run is a gauge animation that finishes at the truth.
-
-This project got it wrong in both directions before measuring against an independent source:
-
-1. Took the last value. Correct, but unverified.
-2. Took the first value, on the reasoning that a battery cannot sweep 32 points in a second and that an identical run repeating across link-ups was suspicious. Both observations are real; neither supports the conclusion. The sweep is an animation frame rate, and a repeated run just means the level had not changed.
-3. Concluded it was not a battery at all and removed the feature.
-
-What settles it is the level the headset reports over Bluetooth at the same moment:
-
-| Burst | first | last | Phone |
-| --- | --- | --- | --- |
-| `[99, 98, 97]` | 99 | **97** | 97 |
-| `[99, 98, 97, 97, 96]` | 99 | **96** | 96 |
-
-Beware the first value specifically: because both ends of a descending run move together, first-values also trace a plausible discharge curve across a day. That curve looks convincing and reads about three points high. Only an independent reading distinguishes them.
-
-### What it does not do
-
-The level is pushed only when the headset links, never on request: a direct query for `0x0CD6` is refused, because over USB that asks the **dongle** for its own battery and the dongle has no battery. Charger events produce no frames at all. So the number is correct as of the last link. The tooltip states connection and reading-age as two separate lines, because a single sentence combining them was read as "not connected since 19:26" when the headset was connected the whole time. To refresh the number, power the headset off and on.
+| Talk to either device over its vendor protocol | Working |
+| Headset battery, queried live | Working, polled every 60s |
+| Mouse battery | Working, pushed by the receiver |
+| Connect/disconnect detection | Working, both devices |
 
 ## The headset protocol
 

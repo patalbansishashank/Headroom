@@ -247,10 +247,30 @@ def _log_frame(frame, _max=512 * 1024):
 
 
 class PlyrHeadsetSource(PushedSource):
+    """Skullcandy Crusher PLYR 720 over its 2.4 GHz dongle.
+
+    The battery is a normal on-demand query. Two details make it work, and
+    getting either wrong makes the headset look like it refuses to answer:
+
+      - the HID report's third byte is a RECIPIENT, not the high half of a
+        16-bit length. 0x00 is the dongle, 0x80 is the headset. Asking the
+        dongle for a battery level gets an error, because the dongle has no
+        battery.
+      - RACE_BLUETOOTH_TWS_GET_BATTERY (0x0CD6) takes a role byte; sent with
+        an empty payload it is rejected.
+
+    The answer arrives as a 0x5D indication of [status, role, percent], in the
+    same HID report as the acknowledgement.
+
+    This stays a pushed source because it also holds the connection open to
+    watch link state, and re-reads the moment the headset connects.
+    """
+
     id = "plyr720"
     name = "Crusher PLYR 720"
     icon = "headphones"
-    staleness_note = "Reports battery only when it connects; power-cycle it for a fresh number"
+    interval = 60.0
+    staleness_note = ""
 
     def available(self):
         import headroom_race as race
@@ -258,27 +278,8 @@ class PlyrHeadsetSource(PushedSource):
 
     def run(self, emit, should_stop):
         import headroom_race as race
-        from headroom_race import BATTERY_BURST_GAP, OP_BATTERY, T_IND
 
         OP_LINK_STATE = 0x2CB1
-
-        # Burst state lives OUTSIDE the reconnect loop, deliberately. The
-        # dongle re-enumerates several times within the second the headset
-        # links, and the battery run arrives in the middle of that. Keeping
-        # this inside the loop meant every reconnect threw the run away
-        # before it could settle, and the level was never committed.
-        state = {"burst": [], "last": 0.0, "linked": None}
-
-        def commit():
-            """Publish the run's final value, if there is one pending."""
-            if not state["burst"]:
-                return
-            run, state["burst"] = state["burst"], []
-            level = run[-1]
-            if 0 < level <= 100:
-                emit(Reading(percent=level,
-                             present=state["linked"] is not False,
-                             at=state["last"]))
 
         while not should_stop():
             node = race.find_node()
@@ -292,45 +293,38 @@ class PlyrHeadsetSource(PushedSource):
                 time.sleep(2.0)
                 continue
 
-            # The dongle is attached. Say so now rather than waiting for a
-            # battery burst: those only arrive when the headset links, which
-            # may be hours away, and until then the widget would claim the
-            # headset is disconnected while the user is listening to it.
-            emit(Reading(present=True))
+            state = {"linked": None, "due": 0.0}
 
             def on_frame(frame):
-                _log_frame(frame)
-                if frame.opcode == OP_BATTERY and frame.type == T_IND and frame.payload:
-                    if time.time() - state["last"] > BATTERY_BURST_GAP:
-                        state["burst"] = []
-                    state["burst"].append(frame.payload[0])
-                    state["last"] = time.time()
-                elif frame.opcode == OP_LINK_STATE and len(frame.payload) >= 3:
+                if frame.opcode == OP_LINK_STATE and len(frame.payload) >= 3:
                     linked = bool(frame.payload[2])
                     if linked != state["linked"]:
                         state["linked"] = linked
                         emit(Reading(present=linked))
+                        # A fresh link deserves a fresh number straight away.
+                        state["due"] = time.time() if linked else 0.0
 
             dev.on_frame = on_frame
+            emit(Reading(present=True))
             delay = 1.0
             try:
                 with dev:
-                    dev.drain(1.5)          # the link-up burst is already queued
+                    dev.drain(1.0)
                     while not should_stop():
                         if dev.pump():
                             delay = 0.005
                         else:
                             delay = min(delay * 2.0, 1.0)
-                        # The run is a gauge animation; the level is where it
-                        # settles, so commit only once it has stopped arriving.
-                        if state["burst"] and time.time() - state["last"] > BATTERY_BURST_GAP:
-                            commit()
+
+                        if time.time() >= state["due"]:
+                            level = dev.read_battery()
+                            state["due"] = time.time() + self.interval
+                            if level is not None:
+                                emit(Reading(percent=level, present=True))
+                            elif state["linked"] is False:
+                                emit(Reading(present=False))
                         time.sleep(delay)
             except race.DeviceGone:
-                # The device is gone, so the run is over whatever the clock
-                # says: whatever arrived last is the level. Waiting for the
-                # settle gap here would lose it to the next re-enumeration.
-                commit()
                 emit(Reading(present=False))
             except OSError:
                 pass
