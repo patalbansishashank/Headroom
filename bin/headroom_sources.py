@@ -171,6 +171,22 @@ class WLMouseSource(PushedSource):
 # Skullcandy Crusher PLYR 720, over its 2.4 GHz dongle
 # --------------------------------------------------------------------------
 
+def _log_frame(frame, _max=512 * 1024):
+    """Append one decoded frame to frames.log, trimming when large."""
+    import os
+    path = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "headroom", "frames.log")
+    try:
+        if os.path.exists(path) and os.path.getsize(path) > _max:
+            with open(path) as fh:
+                tail = fh.readlines()[-2000:]
+            with open(path, "w") as fh:
+                fh.writelines(tail)
+        with open(path, "a") as fh:
+            fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {frame}\n")
+    except OSError:
+        pass
+
+
 class PlyrHeadsetSource(PushedSource):
     id = "plyr720"
     name = "Crusher PLYR 720"
@@ -186,6 +202,24 @@ class PlyrHeadsetSource(PushedSource):
         from headroom_race import BATTERY_BURST_GAP, OP_BATTERY, T_IND
 
         OP_LINK_STATE = 0x2CB1
+
+        # Burst state lives OUTSIDE the reconnect loop, deliberately. The
+        # dongle re-enumerates several times within the second the headset
+        # links, and the battery run arrives in the middle of that. Keeping
+        # this inside the loop meant every reconnect threw the run away
+        # before it could settle, and the level was never committed.
+        state = {"burst": [], "last": 0.0, "linked": None}
+
+        def commit():
+            """Publish the run's final value, if there is one pending."""
+            if not state["burst"]:
+                return
+            run, state["burst"] = state["burst"], []
+            level = run[-1]
+            if 0 < level <= 100:
+                emit(Reading(percent=level,
+                             present=state["linked"] is not False,
+                             at=state["last"]))
 
         while not should_stop():
             node = race.find_node()
@@ -203,10 +237,10 @@ class PlyrHeadsetSource(PushedSource):
             # battery burst: those only arrive when the headset links, which
             # may be hours away, and until then the widget would claim the
             # headset is disconnected while the user is listening to it.
-            state = {"burst": [], "last": 0.0, "linked": None}
             emit(Reading(present=True))
 
             def on_frame(frame):
+                _log_frame(frame)
                 if frame.opcode == OP_BATTERY and frame.type == T_IND and frame.payload:
                     if time.time() - state["last"] > BATTERY_BURST_GAP:
                         state["burst"] = []
@@ -231,14 +265,13 @@ class PlyrHeadsetSource(PushedSource):
                         # The run is a gauge animation; the level is where it
                         # settles, so commit only once it has stopped arriving.
                         if state["burst"] and time.time() - state["last"] > BATTERY_BURST_GAP:
-                            run, state["burst"] = state["burst"], []
-                            level = run[-1]
-                            if 0 < level <= 100:
-                                emit(Reading(percent=level,
-                                             present=state["linked"] is not False,
-                                             at=state["last"]))
+                            commit()
                         time.sleep(delay)
             except race.DeviceGone:
+                # The device is gone, so the run is over whatever the clock
+                # says: whatever arrived last is the level. Waiting for the
+                # settle gap here would lose it to the next re-enumeration.
+                commit()
                 emit(Reading(present=False))
             except OSError:
                 pass

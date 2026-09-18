@@ -77,15 +77,18 @@ Item {
     }
 
     onExited: (code) => {
-      root.devices = []
-      if (!root.wantRunning)
+      if (!root.wantRunning) {
+        root.devices = []
         return
-      // Losing the device lock is not a crash. Back off rather than retrying
-      // every few seconds forever.
+      }
+      // Losing the device lock is not a crash: another instance is serving,
+      // and it only emits on change, so clearing the display here would leave
+      // it blank until the next real change. Keep what we have.
       if (code === root.exitAlreadyRunning) {
         root.restartBackoff = Math.min(root.restartBackoff * 2, 60000)
         Logger.w("Headroom", `devices held by another instance; retrying in ${root.restartBackoff / 1000}s`)
       } else {
+        root.devices = []
         Logger.w("Headroom", `daemon exited (${code}); restarting`)
       }
       restartTimer.interval = root.restartBackoff
