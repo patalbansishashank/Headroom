@@ -145,54 +145,74 @@ class WLMouseSource(PushedSource):
             else:
                 emit(Reading(present=False))
 
+            # Block only on the notification interface. The input node is
+            # NOT registered: an 8 kHz mouse delivers ~8000 reports a second,
+            # and waking on each one to say "still present" is exactly the
+            # kind of cost this daemon must not have. Input is checked at
+            # most once per wait, non-blocking, purely as a liveness hint.
+            notify_fd = next((fd for fd, k in fds.items() if k == "notify"), None)
+            input_fd = next((fd for fd, k in fds.items() if k == "input"), None)
             poller = select.poll()
-            for fd in fds:
-                poller.register(fd, select.POLLIN)
+            if notify_fd is not None:
+                poller.register(notify_fd, select.POLLIN)
+            present = reading is not None
+
+            def set_present(value):
+                nonlocal present
+                if value != present:
+                    present = value
+                    emit(Reading(present=value))
 
             try:
                 while not should_stop():
-                    ready = poller.poll(1000)
-                    if not ready:
-                        continue                    # idle: no cost, no reads
-                    woke = False
+                    ready = poller.poll(5000)
                     for fd, _ in ready:
                         try:
                             while True:
                                 data = _os.read(fd, 64)
                                 if not data:
                                     break
-                                if fds[fd] == "notify":
-                                    parsed = wl.parse_notification(data)
-                                    if not parsed:
-                                        continue
-                                    kind, payload = parsed
-                                    if kind == wl.NOTIFY_LINK and payload:
-                                        # 1 when the mouse links; anything else
-                                        # is it going away.
-                                        linked = payload[0] == 1
-                                        emit(Reading(present=linked))
-                                    elif kind == wl.NOTIFY_BATTERY and len(payload) >= 2:
-                                        percent = payload[1]
-                                        if 0 <= percent <= 100:
-                                            emit(Reading(percent=percent,
-                                                         charging=payload[0] == 1,
-                                                         present=True))
-                                            last_read = time.time()
-                                else:
-                                    woke = True     # the mouse moved
+                                parsed = wl.parse_notification(data)
+                                if not parsed:
+                                    continue
+                                kind, payload = parsed
+                                if kind == wl.NOTIFY_LINK and payload:
+                                    set_present(payload[0] == 1)
+                                elif kind == wl.NOTIFY_BATTERY and len(payload) >= 2:
+                                    percent = payload[1]
+                                    if 0 <= percent <= 100:
+                                        present = True
+                                        emit(Reading(percent=percent,
+                                                     charging=payload[0] == 1,
+                                                     present=True))
+                                        last_read = time.time()
                         except BlockingIOError:
                             pass
                         except OSError:
                             raise wl.Unreachable("receiver went away")
-                    # Movement proves the mouse is on. Refresh the level while
-                    # it is awake, but no more than once per interval.
-                    if woke and time.time() - last_read >= self.interval:
-                        reading = self._read_now()
-                        last_read = time.time()
-                        if reading:
-                            emit(reading)
-                    elif woke:
-                        emit(Reading(present=True))
+
+                    # Liveness hint: anything queued on the input node means
+                    # the mouse moved since we last looked. Drain what is
+                    # there (the kernel keeps only a few dozen reports) and
+                    # move on; never loop on it.
+                    moved = False
+                    if input_fd is not None:
+                        try:
+                            for _ in range(128):
+                                if not _os.read(input_fd, 64):
+                                    break
+                                moved = True
+                        except BlockingIOError:
+                            pass
+                        except OSError:
+                            raise wl.Unreachable("receiver went away")
+                    if moved:
+                        set_present(True)
+                        if time.time() - last_read >= self.interval:
+                            fresh = self._read_now()
+                            last_read = time.time()
+                            if fresh:
+                                emit(fresh)
             except wl.Unreachable:
                 emit(Reading(present=False))
             finally:

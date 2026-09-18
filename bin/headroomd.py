@@ -140,6 +140,15 @@ class Publisher:
     def update(self, source_id, reading):
         with self._lock:
             previous = self._readings.get(source_id)
+            # A reading that changes nothing is dropped before it costs
+            # anything: no log line, no signature, no write. Sources should
+            # already avoid these, but a chatty one must not be able to turn
+            # the daemon into a disk writer.
+            if previous is not None and (
+                    reading.percent in (None, previous.percent)
+                    and reading.present == previous.present
+                    and (reading.percent is None or reading.charging == previous.charging)):
+                return
             self._log(f"{source_id:<10} in: percent={reading.percent} "
                       f"present={reading.present} "
                       f"prev={previous.percent if previous else 'NONE'}")
