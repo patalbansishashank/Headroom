@@ -34,11 +34,11 @@ Item {
   readonly property bool hideWhenUnavailable: config?.hideWhenUnavailable ?? false
   readonly property bool hideAbsent: config?.hideAbsentDevices ?? true
 
-  // Devices worth a gauge: present, or holding a last-known level.
+  // A device that is off or out of range leaves the bar; it comes back when
+  // it does, carrying its last-known level until it reports a fresh one.
+  // The level is still remembered underneath, it is just not drawn.
   readonly property var shown: devices.filter(function (d) {
-    if (!root.hideAbsent)
-      return true
-    return d.present || (d.percent !== null && d.percent !== undefined)
+    return !root.hideAbsent || d.present
   })
 
   visible: shown.length > 0 || !hideWhenUnavailable

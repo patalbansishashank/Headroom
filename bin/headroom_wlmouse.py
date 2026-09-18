@@ -154,6 +154,66 @@ def find_input_node(phys):
     return None
 
 
+NOTIFY_REPORT_ID = 0x04
+NOTIFY_USAGE_PAGE = 0xFFA0
+NOTIFY_BATTERY = 0x03         # [04 03 charging percent ...]
+NOTIFY_LINK = 0x06            # [04 06 state ...]  1 = mouse connected
+
+
+def _declares_notify_report(descriptor):
+    """True if the descriptor carries report id 4 on the 0xFFA0 vendor page."""
+    i, in_page, seen_id = 0, False, False
+    while i < len(descriptor):
+        prefix = descriptor[i]
+        size = prefix & 0x03
+        size = 4 if size == 3 else size
+        tag = prefix & 0xFC
+        value = int.from_bytes(descriptor[i + 1:i + 1 + size], "little") if size else 0
+        if tag == 0x04:
+            in_page = value == NOTIFY_USAGE_PAGE
+        elif tag == 0x84 and in_page and value == NOTIFY_REPORT_ID:
+            return True
+        i += 1 + size
+    return False
+
+
+def find_notify_node(phys):
+    """The receiver interface that pushes link and battery notifications.
+
+    The receiver volunteers both the mouse's connection state and its battery
+    level here, unprompted, on a separate interface from the config one.
+    Listening costs nothing while idle and needs no request the mouse might
+    sleep through.
+    """
+    for sysfs in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+        try:
+            uevent = open(os.path.join(sysfs, "device", "uevent")).read()
+        except OSError:
+            continue
+        if f":{VENDOR_ID:08X}:" not in uevent:
+            continue
+        this_phys = ""
+        for line in uevent.splitlines():
+            if line.startswith("HID_PHYS="):
+                this_phys = line.split("=", 1)[1].strip().split("/input")[0]
+        if phys and this_phys != phys:
+            continue
+        try:
+            descriptor = open(os.path.join(sysfs, "device", "report_descriptor"), "rb").read()
+        except OSError:
+            continue
+        if _declares_notify_report(descriptor):
+            return "/dev/" + os.path.basename(sysfs)
+    return None
+
+
+def parse_notification(report):
+    """(kind, payload) for a report-id-4 notification, else None."""
+    if len(report) < 3 or report[0] != NOTIFY_REPORT_ID:
+        return None
+    return report[1], report[2:]
+
+
 class Unreachable(Exception):
     """The receiver is gone, or the mouse never answered."""
 

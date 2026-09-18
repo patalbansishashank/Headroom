@@ -112,8 +112,8 @@ class WLMouseSource(PushedSource):
         return Reading(percent=percent, charging=charging, present=True)
 
     def run(self, emit, should_stop):
-        import select
         import os as _os
+        import select
         import headroom_wlmouse as wl
 
         last_read = 0.0
@@ -122,49 +122,86 @@ class WLMouseSource(PushedSource):
                 emit(Reading(present=False))
                 time.sleep(5.0)
                 continue
-            emit(Reading(present=True))
 
-            # One attempt up front: the mouse may already be awake.
+            notify_node = wl.find_notify_node(self._phys)
+            input_node = wl.find_input_node(self._phys)
+            fds = {}
+            for kind, node in (("notify", notify_node), ("input", input_node)):
+                if not node:
+                    continue
+                try:
+                    fds[_os.open(node, _os.O_RDONLY | _os.O_NONBLOCK)] = kind
+                except OSError:
+                    pass
+
+            # Presence starts unknown. The receiver says "connected" only at
+            # the moment the mouse links, so a mouse already on and idle when
+            # we start will not announce itself; it is found by answering a
+            # battery read, or by moving. Until one of those, it is not shown.
             reading = self._read_now()
             if reading:
                 emit(reading)
                 last_read = time.time()
-
-            input_node = wl.find_input_node(self._phys)
-            if not input_node:
-                # No way to detect wake; fall back to a slow timer.
-                time.sleep(self.interval)
-                continue
-            try:
-                fd = _os.open(input_node, _os.O_RDONLY | _os.O_NONBLOCK)
-            except OSError:
-                time.sleep(5.0)
-                continue
+            else:
+                emit(Reading(present=False))
 
             poller = select.poll()
-            poller.register(fd, select.POLLIN)
+            for fd in fds:
+                poller.register(fd, select.POLLIN)
+
             try:
                 while not should_stop():
-                    if not poller.poll(1000):
+                    ready = poller.poll(1000)
+                    if not ready:
                         continue                    # idle: no cost, no reads
-                    try:
-                        while _os.read(fd, 64):     # drain; we only need the fact
+                    woke = False
+                    for fd, _ in ready:
+                        try:
+                            while True:
+                                data = _os.read(fd, 64)
+                                if not data:
+                                    break
+                                if fds[fd] == "notify":
+                                    parsed = wl.parse_notification(data)
+                                    if not parsed:
+                                        continue
+                                    kind, payload = parsed
+                                    if kind == wl.NOTIFY_LINK and payload:
+                                        # 1 when the mouse links; anything else
+                                        # is it going away.
+                                        linked = payload[0] == 1
+                                        emit(Reading(present=linked))
+                                    elif kind == wl.NOTIFY_BATTERY and len(payload) >= 2:
+                                        percent = payload[1]
+                                        if 0 <= percent <= 100:
+                                            emit(Reading(percent=percent,
+                                                         charging=payload[0] == 1,
+                                                         present=True))
+                                            last_read = time.time()
+                                else:
+                                    woke = True     # the mouse moved
+                        except BlockingIOError:
                             pass
-                    except BlockingIOError:
-                        pass
-                    except OSError:
-                        break                       # receiver unplugged
-                    if time.time() - last_read < self.interval:
-                        continue
-                    reading = self._read_now()
-                    last_read = time.time()
-                    if reading:
-                        emit(reading)
+                        except OSError:
+                            raise wl.Unreachable("receiver went away")
+                    # Movement proves the mouse is on. Refresh the level while
+                    # it is awake, but no more than once per interval.
+                    if woke and time.time() - last_read >= self.interval:
+                        reading = self._read_now()
+                        last_read = time.time()
+                        if reading:
+                            emit(reading)
+                    elif woke:
+                        emit(Reading(present=True))
+            except wl.Unreachable:
+                emit(Reading(present=False))
             finally:
-                try:
-                    _os.close(fd)
-                except OSError:
-                    pass
+                for fd in fds:
+                    try:
+                        _os.close(fd)
+                    except OSError:
+                        pass
+            time.sleep(1.0)
 
 
 # --------------------------------------------------------------------------

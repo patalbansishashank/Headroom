@@ -267,10 +267,21 @@ def main():
 
     while not STOP.is_set():
         STOP.wait(1.0)
+        # Belt and braces for die_with_parent(): the parent-death signal did
+        # not fire under the shell's spawner at least once, leaving an orphan
+        # holding the lock for twenty minutes. Reparenting to init is
+        # unambiguous, so check for it directly.
+        if os.getppid() == 1:
+            pub._log("--- reparented to init; parent is gone, exiting")
+            break
     pub._log("--- daemon stopping")
     for thread in threads:
-        thread.join(timeout=2.0)
-    return EXIT_OK
+        thread.join(timeout=1.0)
+    # Threads are daemonic, but a thread parked in a blocking read can still
+    # delay interpreter teardown. Nothing after this point needs cleanup: the
+    # state file is already written and the lock is released on exit.
+    sys.stdout.flush()
+    os._exit(EXIT_OK)
 
 
 if __name__ == "__main__":

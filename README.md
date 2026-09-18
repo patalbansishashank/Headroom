@@ -214,4 +214,16 @@ Three things that cost time here:
 
 Several interfaces of one receiver mention the vendor usage page, so matching on the page alone finds the same physical mouse more than once. The config interface is the one declaring a 64-item feature report.
 
+### The receiver volunteers state
+
+A separate interface (usage page `0xFFA0`, report id 4) pushes notifications the OpenMouse driver receives but never decodes. Captured on this receiver:
+
+```
+04 06 01 …        mouse connected
+04 06 00 …        mouse gone
+04 03 cc pp …     battery: cc = charging, pp = percent
+```
+
+So presence and level both arrive unprompted, with no request the mouse might sleep through. Headroom listens here and uses the feature-report read only as an initial probe and an occasional refresh while the mouse is moving.
+
 Protocol reference: the [OpenMouse project](https://github.com/OpenMouse-Project/mouse-protocol)'s WLmouse driver.
